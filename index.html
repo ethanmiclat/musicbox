@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MusicBox — Your Personal Music Journal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/phosphor-icons@1.4.2/src/css/phosphor.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Nav -->
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a href="#" class="logo" data-page="home">
+        <span class="logo-icon">♫</span>
+        <span class="logo-text">MusicBox</span>
+      </a>
+      <div class="nav-links">
+        <a href="#" data-page="home" class="nav-link active">Home</a>
+        <a href="#" data-page="journal" class="nav-link">Journal</a>
+        <a href="#" data-page="discover" class="nav-link">Discover</a>
+        <a href="#" data-page="stats" class="nav-link">Stats</a>
+      </div>
+      <div class="nav-actions">
+        <button class="btn-icon search-toggle" aria-label="Search">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        </button>
+        <button class="btn btn-primary log-btn" id="openLogModal">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          Log
+        </button>
+        <div class="nav-spacer"></div>
+        <div class="auth-buttons" id="authButtons">
+          <button class="btn btn-ghost btn-sm" id="openLoginBtn">Login</button>
+          <button class="btn btn-primary btn-sm" id="openSignupBtn">Sign Up</button>
+        </div>
+        <div class="user-menu" id="userMenu" style="display:none;">
+          <button class="user-chip" id="userChip">
+            <span class="user-avatar" id="userAvatar">?</span>
+            <span class="user-name" id="userName"></span>
+          </button>
+          <div class="user-dropdown" id="userDropdown">
+            <div class="user-dropdown-header">
+              <div class="user-dropdown-name" id="userDropdownName"></div>
+              <div class="user-dropdown-sub">Signed in</div>
+            </div>
+            <button class="user-dropdown-item" id="logoutBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              Log out
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Search Overlay -->
+  <div class="search-overlay" id="searchOverlay">
+    <div class="search-container">
+      <div class="search-input-wrap">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="searchInput" placeholder="Search for a song, artist, or album..." autocomplete="off">
+        <kbd>ESC</kbd>
+      </div>
+      <div class="search-results" id="searchResults"></div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <main class="main-content">
+
+    <!-- HOME PAGE -->
+    <div class="page page-home active" data-page="home">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="hero-bg">
+          <div class="hero-gradient"></div>
+        </div>
+        <div class="hero-content">
+          <h1 class="hero-title">Your music,<br><em>your story.</em></h1>
+          <p class="hero-subtitle">Track every song you listen to. Rate, review, and build your personal music journal.</p>
+          <div class="hero-actions">
+            <button class="btn btn-primary btn-lg" id="heroLogBtn">Start Logging</button>
+            <button class="btn btn-ghost btn-lg" data-page="discover">Explore Music</button>
+          </div>
+          <div class="hero-stats" id="heroStats">
+            <div class="hero-stat">
+              <span class="hero-stat-num" id="totalLogged">0</span>
+              <span class="hero-stat-label">Songs Logged</span>
+            </div>
+            <div class="hero-stat">
+              <span class="hero-stat-num" id="totalReviews">0</span>
+              <span class="hero-stat-label">Reviews Written</span>
+            </div>
+            <div class="hero-stat">
+              <span class="hero-stat-num" id="avgRating">—</span>
+              <span class="hero-stat-label">Avg Rating</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recent Activity -->
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">Recent Activity</h2>
+          <a href="#" class="section-link" data-page="journal">View all →</a>
+        </div>
+        <div class="recent-grid" id="recentGrid">
+          <div class="empty-state">
+            <div class="empty-icon">♫</div>
+            <h3>No songs logged yet</h3>
+            <p>Start building your music journal by logging your first song.</p>
+            <button class="btn btn-primary open-log-modal">Log Your First Song</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Top Rated -->
+      <section class="section" id="topRatedSection" style="display:none;">
+        <div class="section-header">
+          <h2 class="section-title">Your Top Rated</h2>
+        </div>
+        <div class="top-rated-grid" id="topRatedGrid"></div>
+      </section>
+    </div>
+
+    <!-- JOURNAL PAGE -->
+    <div class="page page-journal" data-page="journal">
+      <!-- Journal sub-tabs -->
+      <div class="journal-tabs">
+        <button class="journal-tab active" data-jtab="songs">Songs</button>
+        <button class="journal-tab" data-jtab="collections">Collections</button>
+      </div>
+
+      <!-- Songs sub-page -->
+      <section class="section journal-subpage active" id="journalSongs" data-jtab-content="songs">
+        <div class="section-header">
+          <h2 class="section-title">Your Journal</h2>
+          <div class="journal-controls">
+            <div class="filter-group">
+              <button class="filter-btn active" data-filter="all">All</button>
+              <button class="filter-btn" data-filter="5">★ 5</button>
+              <button class="filter-btn" data-filter="4">★ 4+</button>
+              <button class="filter-btn" data-filter="3">★ 3+</button>
+            </div>
+            <div class="sort-group">
+              <select id="sortSelect">
+                <option value="date-desc">Newest First</option>
+                <option value="date-asc">Oldest First</option>
+                <option value="rating-desc">Highest Rated</option>
+                <option value="rating-asc">Lowest Rated</option>
+                <option value="title-asc">A → Z</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="journal-list" id="journalList">
+          <div class="empty-state">
+            <div class="empty-icon">📓</div>
+            <h3>Your journal is empty</h3>
+            <p>Log songs to see them appear here.</p>
+            <button class="btn btn-primary open-log-modal">Log a Song</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collections sub-page -->
+      <section class="section journal-subpage" id="journalCollections" data-jtab-content="collections">
+        <div class="section-header">
+          <h2 class="section-title">Your Collections</h2>
+          <button class="btn btn-primary btn-sm" id="openCreateCollection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            New Collection
+          </button>
+        </div>
+        <div class="collections-grid" id="collectionsGrid">
+          <div class="empty-state">
+            <div class="empty-icon">📁</div>
+            <h3>No collections yet</h3>
+            <p>Create a collection to group your logged songs together.</p>
+            <button class="btn btn-primary" id="emptyCreateCollection">Create Your First Collection</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collection detail sub-page (shown when viewing a specific collection) -->
+      <section class="section journal-subpage" id="journalCollectionDetail" data-jtab-content="collection-detail">
+        <div id="collectionDetailView"></div>
+      </section>
+    </div>
+
+    <!-- DISCOVER PAGE -->
+    <div class="page page-discover" data-page="discover">
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">Trending Now</h2>
+          <span class="section-source">via ListenBrainz</span>
+        </div>
+        <p class="section-desc">The most-listened artists across the community right now.</p>
+        <div class="discover-tabs" id="trendingTabs">
+          <button class="discover-tab active" data-range="week">This Week</button>
+          <button class="discover-tab" data-range="month">This Month</button>
+          <button class="discover-tab" data-range="year">This Year</button>
+          <button class="discover-tab" data-range="all_time">All Time</button>
+        </div>
+        <div class="chart-list" id="trendingList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">Top Charts</h2>
+          <span class="section-source">via Last.fm</span>
+        </div>
+        <p class="section-desc">Top tracks based on real listening data. Click any row to log it.</p>
+        <div class="discover-tabs" id="chartsTabs">
+          <button class="discover-tab active" data-region="global">Global</button>
+          <button class="discover-tab" data-region="united states">United States</button>
+          <button class="discover-tab" data-region="united kingdom">United Kingdom</button>
+          <button class="discover-tab" data-region="germany">Germany</button>
+          <button class="discover-tab" data-region="japan">Japan</button>
+        </div>
+        <div class="chart-list" id="chartsList"></div>
+      </section>
+    </div>
+
+    <!-- STATS PAGE -->
+    <div class="page page-stats" data-page="stats">
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">Your Stats</h2>
+        </div>
+        <div class="stats-dashboard" id="statsDashboard">
+          <div class="stats-overview">
+            <div class="stat-card">
+              <div class="stat-card-num" id="statTotal">0</div>
+              <div class="stat-card-label">Total Songs</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-num" id="statAvg">—</div>
+              <div class="stat-card-label">Avg Rating</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-num" id="statArtists">0</div>
+              <div class="stat-card-label">Artists</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-num" id="statFives">0</div>
+              <div class="stat-card-label">5-Star Songs</div>
+            </div>
+          </div>
+          <div class="stats-sections">
+            <div class="stats-block">
+              <h3>Rating Distribution</h3>
+              <div class="rating-bars" id="ratingBars"></div>
+            </div>
+            <div class="stats-block">
+              <h3>Top Artists</h3>
+              <div class="top-artists-list" id="topArtistsList">
+                <p class="muted">Log more songs to see your top artists.</p>
+              </div>
+            </div>
+            <div class="stats-block">
+              <h3>Genre Breakdown</h3>
+              <div class="genre-breakdown" id="genreBreakdown">
+                <p class="muted">Log more songs to see your genre breakdown.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- SONG DETAIL PAGE -->
+    <div class="page page-detail" data-page="detail">
+      <div class="detail-view" id="detailView"></div>
+    </div>
+  </main>
+
+  <!-- Auth Modal -->
+  <div class="modal-overlay" id="authModal">
+    <div class="modal auth-modal">
+      <div class="modal-header">
+        <h2 id="authTitle">Welcome Back</h2>
+        <button class="btn-icon modal-close" id="closeAuthModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="auth-subtitle" id="authSubtitle">Sign in to access your personal music journal.</p>
+        <form id="authForm">
+          <div class="form-group">
+            <label for="authUsername">Username <span class="required">*</span></label>
+            <input type="text" id="authUsername" required placeholder="yourname" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="authPassword">Password <span class="required">*</span></label>
+            <input type="password" id="authPassword" required placeholder="••••••••" autocomplete="current-password">
+          </div>
+          <div class="auth-error" id="authError"></div>
+          <div class="modal-footer auth-footer">
+            <button type="submit" class="btn btn-primary btn-lg auth-submit" id="authSubmit">Sign In</button>
+          </div>
+          <div class="auth-switch">
+            <span id="authSwitchText">Don't have an account?</span>
+            <a href="#" id="authSwitchLink">Sign up</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log Song Modal -->
+  <div class="modal-overlay" id="logModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Log a Song</h2>
+        <button class="btn-icon modal-close" id="closeLogModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <form id="logForm" class="modal-body">
+        <div class="form-group form-group-suggest">
+          <label for="songTitle">Song Title <span class="required">*</span></label>
+          <input type="text" id="songTitle" required placeholder="e.g. Bohemian Rhapsody" autocomplete="off">
+          <div class="suggestions" id="titleSuggestions"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group form-group-suggest">
+            <label for="songArtist">Artist <span class="required">*</span></label>
+            <input type="text" id="songArtist" required placeholder="e.g. Queen" autocomplete="off">
+            <div class="suggestions" id="artistSuggestions"></div>
+          </div>
+          <div class="form-group">
+            <label for="songAlbum">Album</label>
+            <input type="text" id="songAlbum" placeholder="e.g. A Night at the Opera">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="songGenre">Genre</label>
+            <select id="songGenre">
+              <option value="">Select genre...</option>
+              <option value="pop">Pop</option>
+              <option value="rock">Rock</option>
+              <option value="hip-hop">Hip-Hop</option>
+              <option value="r&b">R&B</option>
+              <option value="electronic">Electronic</option>
+              <option value="jazz">Jazz</option>
+              <option value="classical">Classical</option>
+              <option value="indie">Indie</option>
+              <option value="country">Country</option>
+              <option value="metal">Metal</option>
+              <option value="folk">Folk</option>
+              <option value="soul">Soul</option>
+              <option value="blues">Blues</option>
+              <option value="latin">Latin</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Date Listened</label>
+            <input type="date" id="songDate">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Your Rating</label>
+          <div class="star-rating-wrap">
+            <div class="star-rating" id="starRating">
+              <div class="star-input" data-value="1"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="2"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="3"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="4"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="5"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+            </div>
+            <span class="star-rating-value" id="starRatingValue">—</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="songReview">Review</label>
+          <textarea id="songReview" rows="4" placeholder="What did you think? How did it make you feel?"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Category Ratings <span class="optional">(optional)</span></label>
+          <p class="field-hint">Rate specific aspects like vocals, lyrics, production, beat...</p>
+          <div class="tag-ratings-list" id="tagRatingsList"></div>
+          <div class="tag-ratings-add">
+            <input type="text" id="tagNameInput" placeholder="Category name (e.g. vocals)" maxlength="24">
+            <div class="star-rating star-rating-mini" id="tagRatingStars">
+              <div class="star-input" data-value="1"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="2"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="3"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="4"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+              <div class="star-input" data-value="5"><span class="sb-bg">★</span><span class="sb-fg">★</span></div>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" id="addTagBtn">Add</button>
+          </div>
+        </div>
+        <div class="form-group" id="logCollectionGroup">
+          <label>Add to Collection <span class="optional">(optional)</span></label>
+          <div class="log-collection-picker" id="logCollectionPicker"></div>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="songFavorite">
+            <span class="heart-check">♥</span> Mark as Favorite
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="cancelLog">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save to Journal</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Album Tracklist Modal -->
+  <div class="modal-overlay" id="albumModal">
+    <div class="modal album-modal">
+      <div class="modal-header">
+        <h2 id="albumModalTitle">Album</h2>
+        <button class="btn-icon modal-close" id="closeAlbumModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body album-modal-body">
+        <div class="album-modal-header" id="albumModalHeader"></div>
+        <div class="album-modal-tracks" id="albumModalTracks"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Collection Modal -->
+  <div class="modal-overlay" id="createCollectionModal">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>New Collection</h2>
+        <button class="btn-icon modal-close" id="closeCreateCollectionModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <form id="createCollectionForm" class="modal-body">
+        <div class="form-group">
+          <label for="collectionName">Name <span class="required">*</span></label>
+          <input type="text" id="collectionName" required placeholder="e.g. Chill Vibes, Kendrick Tracks..." maxlength="60" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="collectionDesc">Description</label>
+          <input type="text" id="collectionDesc" placeholder="Optional description..." maxlength="120" autocomplete="off">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="cancelCreateCollection">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add to Collection Modal -->
+  <div class="modal-overlay" id="addToCollectionModal">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>Add to Collection</h2>
+        <button class="btn-icon modal-close" id="closeAddToCollectionModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="add-to-collection-list" id="addToCollectionList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span class="footer-logo">♫ MusicBox</span>
+      <span class="footer-text">Your personal MusicBox!</span>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

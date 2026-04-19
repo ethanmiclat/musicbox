@@ -1,0 +1,2194 @@
+/* ========================================
+   MusicBox — App Logic
+   ======================================== */
+
+// ── Auth Layer ──────────────────────────
+const USERS_KEY = 'musicbox_users';
+const SESSION_KEY = 'musicbox_session';
+const LEGACY_JOURNAL_KEY = 'musicbox_journal';
+
+function hashPassword(password) {
+  // Lightweight hash (NOT cryptographic — this is a demo app with client-only storage)
+  let h = 5381;
+  for (let i = 0; i < password.length; i++) {
+    h = ((h << 5) + h) + password.charCodeAt(i);
+    h |= 0;
+  }
+  return 'h_' + Math.abs(h).toString(36) + '_' + password.length;
+}
+
+function getUsers() {
+  try { return JSON.parse(localStorage.getItem(USERS_KEY)) || []; }
+  catch { return []; }
+}
+
+function saveUsers(users) {
+  localStorage.setItem(USERS_KEY, JSON.stringify(users));
+}
+
+function getCurrentUser() {
+  return localStorage.getItem(SESSION_KEY);
+}
+
+function setCurrentUser(username) {
+  if (username) localStorage.setItem(SESSION_KEY, username);
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+function isLoggedIn() {
+  return !!getCurrentUser();
+}
+
+function signup(username, password) {
+  username = username.trim();
+  if (!username || username.length < 2) return { error: 'Username must be at least 2 characters.' };
+  if (password.length < 4) return { error: 'Password must be at least 4 characters.' };
+
+  const users = getUsers();
+  if (users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
+    return { error: 'That username is already taken.' };
+  }
+
+  users.push({
+    username,
+    passwordHash: hashPassword(password),
+    createdAt: new Date().toISOString(),
+  });
+  saveUsers(users);
+  setCurrentUser(username);
+  return { success: true, username };
+}
+
+function login(username, password) {
+  username = username.trim();
+  const users = getUsers();
+  const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+  if (!user) return { error: 'No account found with that username.' };
+  if (user.passwordHash !== hashPassword(password)) return { error: 'Incorrect password.' };
+  setCurrentUser(user.username);
+  return { success: true, username: user.username };
+}
+
+function logout() {
+  setCurrentUser(null);
+}
+
+// ── Data Layer (per-user) ───────────────
+function journalKey() {
+  const user = getCurrentUser();
+  return user ? `musicbox_journal_${user}` : null;
+}
+
+function getJournal() {
+  const key = journalKey();
+  if (!key) return [];
+  try {
+    return JSON.parse(localStorage.getItem(key)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveJournal(entries) {
+  const key = journalKey();
+  if (!key) return;
+  localStorage.setItem(key, JSON.stringify(entries));
+}
+
+function addEntry(entry) {
+  const entries = getJournal();
+  entry.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  entry.createdAt = new Date().toISOString();
+  entries.unshift(entry);
+  saveJournal(entries);
+  return entry;
+}
+
+function deleteEntry(id) {
+  const entries = getJournal().filter(e => e.id !== id);
+  saveJournal(entries);
+}
+
+function getEntry(id) {
+  return getJournal().find(e => e.id === id);
+}
+
+// ── Collections (per-user playlists) ───────────────
+function collectionsKey() {
+  const user = getCurrentUser();
+  return user ? `musicbox_collections_${user}` : null;
+}
+
+function getCollections() {
+  const key = collectionsKey();
+  if (!key) return [];
+  try { return JSON.parse(localStorage.getItem(key)) || []; }
+  catch { return []; }
+}
+
+function saveCollections(collections) {
+  const key = collectionsKey();
+  if (!key) return;
+  localStorage.setItem(key, JSON.stringify(collections));
+}
+
+function createCollection(name, description) {
+  const collections = getCollections();
+  const col = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: name.trim(),
+    description: (description || '').trim(),
+    songIds: [],
+    createdAt: new Date().toISOString(),
+  };
+  collections.unshift(col);
+  saveCollections(collections);
+  return col;
+}
+
+function deleteCollection(id) {
+  saveCollections(getCollections().filter(c => c.id !== id));
+}
+
+function getCollection(id) {
+  return getCollections().find(c => c.id === id) || null;
+}
+
+function addSongToCollection(collectionId, songId) {
+  const collections = getCollections();
+  const col = collections.find(c => c.id === collectionId);
+  if (!col) return false;
+  if (col.songIds.includes(songId)) return false;
+  col.songIds.push(songId);
+  saveCollections(collections);
+  return true;
+}
+
+function removeSongFromCollection(collectionId, songId) {
+  const collections = getCollections();
+  const col = collections.find(c => c.id === collectionId);
+  if (!col) return;
+  col.songIds = col.songIds.filter(id => id !== songId);
+  saveCollections(collections);
+}
+
+// ── Music Catalog (MusicBrainz + Cover Art Archive) ──
+// Local cache of music metadata pulled from MusicBrainz so we don't
+// re-fetch on every interaction. Acts as a lightweight client-side DB.
+const CATALOG_KEY = 'musicbox_catalog';
+const SEARCH_CACHE_KEY = 'musicbox_mb_search_cache';
+const COVER_NEG_KEY = 'musicbox_cover_misses';
+const MB_USER_AGENT_NOTE = 'MusicBox/1.0 (personal music journal)';
+
+function getCatalog() {
+  try { return JSON.parse(localStorage.getItem(CATALOG_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveCatalog(c) {
+  try { localStorage.setItem(CATALOG_KEY, JSON.stringify(c)); } catch {}
+}
+function cacheCatalogItem(item) {
+  if (!item || !item.mbId) return;
+  const c = getCatalog();
+  c[item.mbId] = { ...item, cachedAt: Date.now() };
+  saveCatalog(c);
+}
+function getCatalogItem(mbId) {
+  return getCatalog()[mbId] || null;
+}
+
+function getMbSearchCache() {
+  try { return JSON.parse(sessionStorage.getItem(SEARCH_CACHE_KEY)) || {}; }
+  catch { return {}; }
+}
+function setMbSearchCache(q, results) {
+  const c = getMbSearchCache();
+  c[q] = results;
+  try { sessionStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify(c)); } catch {}
+}
+
+function getCoverMisses() {
+  try { return JSON.parse(sessionStorage.getItem(COVER_NEG_KEY)) || {}; }
+  catch { return {}; }
+}
+function markCoverMiss(rgId) {
+  if (!rgId) return;
+  const m = getCoverMisses();
+  m[rgId] = 1;
+  try { sessionStorage.setItem(COVER_NEG_KEY, JSON.stringify(m)); } catch {}
+}
+
+// MusicBrainz asks for ≤1 request/sec. Throttle accordingly.
+let mbLastRequest = 0;
+async function mbThrottle() {
+  const now = Date.now();
+  const wait = Math.max(0, 1100 - (now - mbLastRequest));
+  if (wait) await new Promise(r => setTimeout(r, wait));
+  mbLastRequest = Date.now();
+}
+
+function buildCoverUrl(releaseGroupId) {
+  if (!releaseGroupId) return null;
+  if (getCoverMisses()[releaseGroupId]) return null;
+  return `https://coverartarchive.org/release-group/${releaseGroupId}/front-250`;
+}
+
+async function searchMusicBrainz(query) {
+  const q = query.trim();
+  if (!q) return [];
+  const key = q.toLowerCase();
+  const cached = getMbSearchCache()[key];
+  if (cached) return cached;
+
+  await mbThrottle();
+  try {
+    const url = `https://musicbrainz.org/ws/2/recording/?query=${encodeURIComponent(q)}&limit=10&fmt=json`;
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error('MusicBrainz HTTP ' + res.status);
+    const data = await res.json();
+
+    const results = (data.recordings || []).map(r => {
+      const release = (r.releases && r.releases[0]) || null;
+      const releaseGroup = release && release['release-group'] ? release['release-group'] : null;
+      const releaseGroupId = releaseGroup ? releaseGroup.id : null;
+      return {
+        mbId: r.id,
+        title: r.title || '',
+        artist: (r['artist-credit'] || []).map(a => a.name).join(', '),
+        album: release ? release.title : '',
+        releaseId: release ? release.id : null,
+        releaseGroupId,
+        date: (release && release.date) || r['first-release-date'] || '',
+        coverUrl: buildCoverUrl(releaseGroupId),
+      };
+    });
+
+    setMbSearchCache(key, results);
+    // Pre-cache the catalog entries so future logs/views are instant.
+    results.forEach(cacheCatalogItem);
+    return results;
+  } catch (e) {
+    console.warn('MusicBrainz search failed:', e);
+    return [];
+  }
+}
+
+// ── Discover: Last.fm Top Charts + ListenBrainz Trending ──
+// Both APIs send `Access-Control-Allow-Origin: *`, so they work from
+// file:// pages with no proxy. Last.fm provides the global / per-country
+// chart (real scrobble data); ListenBrainz provides sitewide artist
+// trends with a time-range filter. Album/artist artwork is enriched
+// lazily via the iTunes Search API and cached separately so we don't
+// re-fetch images even after the data cache expires.
+const LASTFM_API_KEY = '8ea070b95e74f7f872b31ea41492e055';
+const DISCOVER_CACHE_KEY = 'musicbox_discover_v1';
+const DISCOVER_TTL = 1000 * 60 * 60; // 1 hour
+const ART_CACHE_KEY = 'musicbox_art_cache_v1';
+const ART_TTL = 1000 * 60 * 60 * 24 * 30; // 30 days
+
+function getDiscoverCache() {
+  try { return JSON.parse(localStorage.getItem(DISCOVER_CACHE_KEY)) || {}; }
+  catch { return {}; }
+}
+function readCachedDiscover(name) {
+  const c = getDiscoverCache();
+  const entry = c[name];
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > DISCOVER_TTL) return null;
+  return entry.data;
+}
+function writeCachedDiscover(name, data) {
+  const c = getDiscoverCache();
+  c[name] = { fetchedAt: Date.now(), data };
+  try { localStorage.setItem(DISCOVER_CACHE_KEY, JSON.stringify(c)); } catch {}
+}
+
+function getArtCache() {
+  try { return JSON.parse(localStorage.getItem(ART_CACHE_KEY)) || {}; }
+  catch { return {}; }
+}
+function readCachedArt(key) {
+  const c = getArtCache();
+  const entry = c[key];
+  if (!entry) return undefined; // undefined = never tried
+  if (Date.now() - entry.fetchedAt > ART_TTL) return undefined;
+  return entry.url; // null = tried and failed (legitimately negative)
+}
+function writeCachedArt(key, url) {
+  const c = getArtCache();
+  c[key] = { fetchedAt: Date.now(), url };
+  try { localStorage.setItem(ART_CACHE_KEY, JSON.stringify(c)); } catch {}
+}
+
+function upgradeAppleArtwork(url) {
+  if (!url) return null;
+  return url.replace(/\/\d+x\d+(bb)?\./, '/600x600bb.');
+}
+
+// Lazy art enrichment via iTunes Search. Cached aggressively.
+async function enrichArt(item, kind) {
+  // kind: 'track' | 'artist'
+  const key = kind === 'track'
+    ? `t::${(item.artist || '').toLowerCase()}::${(item.title || '').toLowerCase()}`
+    : `a::${(item.name || '').toLowerCase()}`;
+  const cached = readCachedArt(key);
+  if (cached !== undefined) return cached;
+
+  const term = kind === 'track' ? `${item.artist} ${item.title}` : item.name;
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=1`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('iTunes search HTTP ' + res.status);
+    const data = await res.json();
+    const r = (data.results || [])[0];
+    const cover = r ? upgradeAppleArtwork(r.artworkUrl100) : null;
+    writeCachedArt(key, cover);
+    return cover;
+  } catch (e) {
+    writeCachedArt(key, null);
+    return null;
+  }
+}
+
+// ── Last.fm Top Charts ──
+// region: 'global' | country name (lowercase, e.g. 'united states')
+async function fetchLastFmTopTracks(region) {
+  const cacheName = `lastfm_${region}`;
+  const cached = readCachedDiscover(cacheName);
+  if (cached) return cached;
+
+  const base = 'https://ws.audioscrobbler.com/2.0/';
+  const url = region === 'global'
+    ? `${base}?method=chart.gettoptracks&api_key=${LASTFM_API_KEY}&format=json&limit=20`
+    : `${base}?method=geo.gettoptracks&country=${encodeURIComponent(region)}&api_key=${LASTFM_API_KEY}&format=json&limit=20`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Last.fm HTTP ' + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error('Last.fm error ' + data.error + ': ' + data.message);
+    const tracks = (data.tracks && data.tracks.track) || [];
+    const items = tracks.map(t => {
+      const artistName = (t.artist && (t.artist.name || t.artist['#text'])) || '';
+      // Last.fm image URLs are usually placeholder stars now — we'll enrich later.
+      const lfmImg = pickLastFmImage(t.image);
+      return {
+        title: t.name || '',
+        artist: artistName,
+        album: '',
+        listeners: parseInt(t.listeners, 10) || 0,
+        playcount: parseInt(t.playcount, 10) || 0,
+        url: t.url || '',
+        coverUrl: lfmImg,
+      };
+    }).filter(t => t.title && t.artist);
+    writeCachedDiscover(cacheName, items);
+    return items;
+  } catch (e) {
+    console.warn('Last.fm fetch failed:', e);
+    return [];
+  }
+}
+
+function pickLastFmImage(images) {
+  if (!Array.isArray(images)) return null;
+  // Prefer largest non-empty, non-placeholder image. Last.fm's default
+  // "stars" placeholder includes "2a96cbd8b46e442fc41c2b86b821562f" in its
+  // URL — filter that out.
+  const order = ['mega', 'extralarge', 'large', 'medium', 'small'];
+  for (const size of order) {
+    const img = images.find(i => i.size === size);
+    if (img && img['#text'] && !img['#text'].includes('2a96cbd8b46e442fc41c2b86b821562f')) {
+      return img['#text'];
+    }
+  }
+  return null;
+}
+
+// ── ListenBrainz Trending Artists ──
+// range: 'week' | 'month' | 'year' | 'all_time'
+async function fetchListenBrainzTrending(range) {
+  const cacheName = `lb_${range}`;
+  const cached = readCachedDiscover(cacheName);
+  if (cached) return cached;
+
+  const url = `https://api.listenbrainz.org/1/stats/sitewide/artists?range=${encodeURIComponent(range)}&count=20`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('ListenBrainz HTTP ' + res.status);
+    const data = await res.json();
+    const artists = (data.payload && data.payload.artists) || [];
+    const items = artists.map(a => ({
+      name: a.artist_name || '',
+      mbid: a.artist_mbid || null,
+      listenCount: a.listen_count || 0,
+    })).filter(a => a.name);
+    writeCachedDiscover(cacheName, items);
+    return items;
+  } catch (e) {
+    console.warn('ListenBrainz fetch failed:', e);
+    return [];
+  }
+}
+
+function formatListenCount(n) {
+  if (!n || isNaN(n)) return '—';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(n);
+}
+
+// ── Album Detail (kept for potential reuse — currently not wired) ──
+async function fetchAlbumDetail(collectionId) {
+  if (!collectionId) return null;
+  try {
+    const res = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(collectionId)}&entity=song&limit=200`);
+    if (!res.ok) throw new Error('iTunes lookup HTTP ' + res.status);
+    const data = await res.json();
+    const results = data.results || [];
+    const album = results.find(r => r.wrapperType === 'collection');
+    const trackRows = results.filter(r => r.wrapperType === 'track' && r.kind === 'song');
+    if (!album) return null;
+    return {
+      id: album.collectionId,
+      title: album.collectionName || '',
+      artist: album.artistName || '',
+      coverUrl: upgradeAppleArtwork(album.artworkUrl100) || null,
+      releaseDate: album.releaseDate || '',
+      genres: album.primaryGenreName ? [album.primaryGenreName] : [],
+      tracks: trackRows
+        .sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
+        .map(t => ({
+          id: t.trackId,
+          title: t.trackName || '',
+          artist: t.artistName || '',
+          duration: t.trackTimeMillis ? Math.round(t.trackTimeMillis / 1000) : 0,
+          trackPosition: t.trackNumber || 0,
+        })),
+    };
+    writeCachedAlbum(collectionId, detail);
+    return detail;
+  } catch (e) {
+    console.warn('Album detail fetch failed:', e);
+    return null;
+  }
+}
+
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return '';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ── iTunes Search (autocomplete in log modal) ──
+async function searchITunesSongs(query) {
+  const q = (query || '').trim();
+  if (q.length < 2) return [];
+  try {
+    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=8`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('iTunes search HTTP ' + res.status);
+    const data = await res.json();
+    return (data.results || []).map(r => ({
+      title: r.trackName || '',
+      artist: r.artistName || '',
+      album: r.collectionName || '',
+      coverUrl: upgradeAppleArtwork(r.artworkUrl100),
+      genre: (r.primaryGenreName || '').toLowerCase(),
+      releaseDate: r.releaseDate || '',
+    })).filter(r => r.title && r.artist);
+  } catch (e) {
+    console.warn('iTunes search failed:', e);
+    return [];
+  }
+}
+
+// ── Helpers ─────────────────────────────
+function hashStr(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function getCoverHue(title, artist) {
+  return hashStr(title + artist) % 360;
+}
+
+function renderCoverArt(item) {
+  const hue = getCoverHue(item.title || '', item.artist || '');
+  const grad = `background: linear-gradient(135deg, hsl(${hue}, 40%, 25%) 0%, hsl(${hue + 40}, 35%, 18%) 100%);`;
+  const imgTag = item.coverUrl
+    ? `<img class="cover-img" src="${escapeHtml(item.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('cover-img-failed')">`
+    : '';
+  return `
+    <div class="cover-gradient" style="${grad}"></div>
+    ${imgTag}
+  `;
+}
+
+function renderStars(rating) {
+  const r = Number(rating) || 0;
+  let html = '<span class="stars-display">';
+  for (let i = 1; i <= 5; i++) {
+    let pct = 0;
+    if (r >= i) pct = 100;
+    else if (r >= i - 0.5) pct = 50;
+    html += `<span class="star-box"><span class="sb-bg">★</span><span class="sb-fg" style="width:${pct}%">★</span></span>`;
+  }
+  html += '</span>';
+  return html;
+}
+
+function formatRating(r) {
+  if (!r) return '—';
+  return Number.isInteger(r) ? r.toFixed(1) : r.toString();
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function showToast(message, type = 'success') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('removing');
+    setTimeout(() => toast.remove(), 250);
+  }, 3000);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Rendering ───────────────────────────
+function renderSongCard(entry) {
+  return `
+    <div class="song-card" data-id="${entry.id}">
+      <div class="song-card-cover">
+        ${renderCoverArt(entry)}
+        ${entry.favorite ? '<span class="song-card-favorite">♥</span>' : ''}
+      </div>
+      <div class="song-card-body">
+        <div class="song-card-title">${escapeHtml(entry.title)}</div>
+        <div class="song-card-artist">${escapeHtml(entry.artist)}</div>
+        <div class="song-card-stars">${renderStars(entry.rating)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderJournalEntry(entry) {
+  return `
+    <div class="journal-entry" data-id="${entry.id}">
+      <div class="journal-entry-cover">
+        ${renderCoverArt(entry)}
+      </div>
+      <div class="journal-entry-info">
+        <div class="journal-entry-title">${escapeHtml(entry.title)} ${entry.favorite ? '<span class="fav">♥</span>' : ''}</div>
+        <div class="journal-entry-meta">
+          <span>${escapeHtml(entry.artist)}</span>
+          ${entry.genre ? `<span>· ${escapeHtml(entry.genre)}</span>` : ''}
+        </div>
+      </div>
+      <div class="journal-entry-stars">${renderStars(entry.rating)}</div>
+      <div class="journal-entry-date">${formatDate(entry.date || entry.createdAt)}</div>
+    </div>
+  `;
+}
+
+function renderDiscoverCard(song) {
+  const primaryGenre = (song.genres && song.genres[0]) || song.genre || '';
+  return `
+    <div class="discover-card"
+      data-title="${escapeHtml(song.title)}"
+      data-artist="${escapeHtml(song.artist)}"
+      data-album="${escapeHtml(song.album || '')}"
+      data-genre="${escapeHtml(primaryGenre)}"
+      ${song.coverUrl ? `data-cover="${escapeHtml(song.coverUrl)}"` : ''}>
+      <div class="discover-card-cover">
+        ${renderCoverArt(song)}
+      </div>
+      <div class="discover-card-body">
+        <div class="discover-card-title">${escapeHtml(song.title)}</div>
+        <div class="discover-card-artist">${escapeHtml(song.artist)}</div>
+        ${primaryGenre ? `<span class="discover-card-genre">${escapeHtml(primaryGenre)}</span>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderChartRow(item, rank) {
+  const primaryGenre = (item.genres && item.genres[0]) || '';
+  return `
+    <div class="chart-row"
+      data-title="${escapeHtml(item.title)}"
+      data-artist="${escapeHtml(item.artist)}"
+      data-album="${escapeHtml(item.album || '')}"
+      data-genre="${escapeHtml(primaryGenre)}"
+      ${item.coverUrl ? `data-cover="${escapeHtml(item.coverUrl)}"` : ''}>
+      <div class="chart-rank">${rank}</div>
+      <div class="chart-cover">${renderCoverArt(item)}</div>
+      <div class="chart-info">
+        <div class="chart-title">${escapeHtml(item.title)}</div>
+        <div class="chart-artist">${escapeHtml(item.artist)}</div>
+      </div>
+      ${primaryGenre ? `<div class="chart-genre">${escapeHtml(primaryGenre)}</div>` : ''}
+      <button class="chart-log-btn" type="button" aria-label="Log to journal">+ Log</button>
+    </div>
+  `;
+}
+
+function renderDetailView(entry) {
+  return `
+    <div class="detail-back" id="detailBack">← Back</div>
+    <div class="detail-header">
+      <div class="detail-cover">
+        ${renderCoverArt(entry)}
+      </div>
+      <div class="detail-info">
+        <h1 class="detail-title">${escapeHtml(entry.title)}</h1>
+        <div class="detail-artist">${escapeHtml(entry.artist)}</div>
+        ${entry.album ? `<div class="detail-album">${escapeHtml(entry.album)}</div>` : ''}
+        <div class="detail-stars">${renderStars(entry.rating)}</div>
+        <div class="detail-tags">
+          ${entry.genre ? `<span class="detail-tag detail-tag-genre">${escapeHtml(entry.genre)}</span>` : ''}
+          ${entry.favorite ? '<span class="detail-tag detail-tag-fav">♥ Favorite</span>' : ''}
+          ${entry.date ? `<span class="detail-tag detail-tag-date">${formatDate(entry.date)}</span>` : ''}
+        </div>
+      </div>
+    </div>
+    ${entry.review ? `
+      <div class="detail-review">
+        <h3>Your Review</h3>
+        <p>${escapeHtml(entry.review)}</p>
+      </div>
+    ` : ''}
+    ${entry.tags && entry.tags.length > 0 ? `
+      <div class="detail-tag-ratings">
+        <h3>Category Ratings</h3>
+        ${entry.tags.map(t => `
+          <div class="detail-tag-rating-row">
+            <span class="detail-tag-rating-name">${escapeHtml(t.name)}</span>
+            <span class="detail-tag-rating-stars">${renderStars(t.rating)}</span>
+            <span class="detail-tag-rating-value">${formatRating(t.rating)}</span>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+    <div class="detail-actions">
+      <button class="btn btn-primary btn-sm" id="detailAddToCollection" data-id="${entry.id}">+ Add to Collection</button>
+      <button class="btn btn-ghost btn-sm" id="detailDelete" data-id="${entry.id}">Delete Entry</button>
+    </div>
+  `;
+}
+
+// ── Page Rendering ──────────────────────
+function renderHome() {
+  const entries = getJournal();
+  const recentGrid = document.getElementById('recentGrid');
+  const topRatedSection = document.getElementById('topRatedSection');
+  const topRatedGrid = document.getElementById('topRatedGrid');
+
+  // Hero stats
+  document.getElementById('totalLogged').textContent = entries.length;
+  const withReviews = entries.filter(e => e.review);
+  document.getElementById('totalReviews').textContent = withReviews.length;
+  if (entries.length > 0) {
+    const avg = entries.reduce((s, e) => s + (e.rating || 0), 0) / entries.length;
+    document.getElementById('avgRating').textContent = avg.toFixed(1);
+  } else {
+    document.getElementById('avgRating').textContent = '—';
+  }
+
+  // Recent grid
+  if (entries.length === 0) {
+    recentGrid.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">♫</div>
+        <h3>No songs logged yet</h3>
+        <p>Start building your music journal by logging your first song.</p>
+        <button class="btn btn-primary open-log-modal">Log Your First Song</button>
+      </div>
+    `;
+  } else {
+    recentGrid.innerHTML = entries.slice(0, 8).map(renderSongCard).join('');
+  }
+
+  // Top rated
+  const topRated = [...entries].filter(e => e.rating >= 4).sort((a, b) => b.rating - a.rating).slice(0, 6);
+  if (topRated.length > 0) {
+    topRatedSection.style.display = 'block';
+    topRatedGrid.innerHTML = topRated.map(renderSongCard).join('');
+  } else {
+    topRatedSection.style.display = 'none';
+  }
+}
+
+function renderJournal(filter = 'all', sort = 'date-desc') {
+  let entries = getJournal();
+  const list = document.getElementById('journalList');
+
+  // Filter
+  if (filter !== 'all') {
+    const minRating = parseInt(filter);
+    entries = entries.filter(e => e.rating >= minRating);
+  }
+
+  // Sort
+  switch (sort) {
+    case 'date-asc':
+      entries.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+      break;
+    case 'date-desc':
+      entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      break;
+    case 'rating-desc':
+      entries.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      break;
+    case 'rating-asc':
+      entries.sort((a, b) => (a.rating || 0) - (b.rating || 0));
+      break;
+    case 'title-asc':
+      entries.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+  }
+
+  if (entries.length === 0) {
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📓</div>
+        <h3>${filter === 'all' ? 'Your journal is empty' : 'No songs match this filter'}</h3>
+        <p>${filter === 'all' ? 'Log songs to see them appear here.' : 'Try a different filter.'}</p>
+        ${filter === 'all' ? '<button class="btn btn-primary open-log-modal">Log a Song</button>' : ''}
+      </div>
+    `;
+  } else {
+    list.innerHTML = entries.map(renderJournalEntry).join('');
+  }
+}
+
+// ── Collections Rendering ──────────────
+let _activeCollectionId = null;
+
+function renderCollections() {
+  const grid = document.getElementById('collectionsGrid');
+  if (!grid) return;
+  const collections = getCollections();
+  const journal = getJournal();
+
+  if (!collections.length) {
+    grid.innerHTML = `
+      <div class="empty-state" style="grid-column: 1 / -1;">
+        <div class="empty-icon">📁</div>
+        <h3>No collections yet</h3>
+        <p>Create a collection to group your logged songs together.</p>
+        <button class="btn btn-primary" id="emptyCreateCollection">Create Your First Collection</button>
+      </div>
+    `;
+    return;
+  }
+
+  grid.innerHTML = collections.map(col => {
+    const songs = col.songIds.map(id => journal.find(e => e.id === id)).filter(Boolean);
+    const coverSongs = songs.slice(0, 4);
+    const coverCells = Array.from({ length: 4 }).map((_, i) => {
+      const s = coverSongs[i];
+      if (s) {
+        const hue = getCoverHue(s.title, s.artist);
+        const img = s.coverUrl
+          ? `<img src="${escapeHtml(s.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+          : '';
+        return `<div class="collection-card-cover-cell">
+          <div class="cover-gradient" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));"></div>
+          <span class="cover-icon">♫</span>
+          ${img}
+        </div>`;
+      }
+      return `<div class="collection-card-cover-cell">
+        <div class="cover-gradient" style="background: linear-gradient(135deg, hsl(220,15%,18%), hsl(240,10%,14%));"></div>
+      </div>`;
+    }).join('');
+
+    return `
+      <div class="collection-card" data-collection-id="${col.id}">
+        <div class="collection-card-covers">${coverCells}</div>
+        <div class="collection-card-name">${escapeHtml(col.name)}</div>
+        <div class="collection-card-meta">${songs.length} song${songs.length !== 1 ? 's' : ''}${col.description ? ' · ' + escapeHtml(col.description) : ''}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderCollectionDetail(collectionId) {
+  const col = getCollection(collectionId);
+  const view = document.getElementById('collectionDetailView');
+  if (!col || !view) return;
+  _activeCollectionId = collectionId;
+
+  const journal = getJournal();
+  const songs = col.songIds.map(id => journal.find(e => e.id === id)).filter(Boolean);
+
+  let html = `
+    <div class="collection-detail-back" id="collectionBack">← Back to Collections</div>
+    <div class="collection-detail-header">
+      <div class="collection-detail-info">
+        <div class="collection-detail-name">${escapeHtml(col.name)}</div>
+        ${col.description ? `<div class="collection-detail-desc">${escapeHtml(col.description)}</div>` : ''}
+        <div class="collection-detail-count">${songs.length} song${songs.length !== 1 ? 's' : ''}</div>
+      </div>
+      <div class="collection-detail-actions">
+        <button class="btn btn-ghost btn-sm" id="deleteCollectionBtn" data-id="${col.id}">Delete</button>
+      </div>
+    </div>
+  `;
+
+  if (!songs.length) {
+    html += `
+      <div class="empty-state">
+        <div class="empty-icon">🎵</div>
+        <h3>No songs in this collection</h3>
+        <p>Open a song from your journal and add it to this collection.</p>
+      </div>
+    `;
+  } else {
+    html += songs.map(entry => {
+      const hue = getCoverHue(entry.title, entry.artist);
+      const coverImg = entry.coverUrl
+        ? `<img src="${escapeHtml(entry.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+        : '';
+      return `
+        <div class="collection-song-row" data-id="${entry.id}" data-collection-id="${col.id}">
+          <div class="collection-song-cover">
+            <div class="cover-gradient" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));"></div>
+            <span class="cover-icon">♫</span>
+            ${coverImg}
+          </div>
+          <div class="collection-song-info">
+            <div class="collection-song-title">${escapeHtml(entry.title)}</div>
+            <div class="collection-song-artist">${escapeHtml(entry.artist)}</div>
+          </div>
+          <div class="collection-song-stars">${renderStars(entry.rating)}</div>
+          <button class="collection-song-remove" data-song-id="${entry.id}" data-collection-id="${col.id}" type="button">Remove</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  view.innerHTML = html;
+}
+
+function showJournalSubpage(name) {
+  document.querySelectorAll('.journal-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.jtab === name));
+  document.querySelectorAll('.journal-subpage').forEach(p =>
+    p.classList.toggle('active', p.dataset.jtabContent === name));
+  if (name === 'songs') renderJournal();
+  if (name === 'collections') renderCollections();
+}
+
+function openAddToCollectionModal(songId) {
+  const modal = document.getElementById('addToCollectionModal');
+  const list = document.getElementById('addToCollectionList');
+  const collections = getCollections();
+
+  if (!collections.length) {
+    list.innerHTML = '<p class="muted" style="padding:12px;">No collections yet. Create one first!</p>';
+  } else {
+    list.innerHTML = collections.map(col => {
+      const inCol = col.songIds.includes(songId);
+      return `
+        <div class="add-to-collection-item ${inCol ? 'in-collection' : ''}"
+          data-collection-id="${col.id}" data-song-id="${songId}">
+          <div class="add-to-collection-item-check">✓</div>
+          <div class="add-to-collection-item-name">${escapeHtml(col.name)}</div>
+          <div class="add-to-collection-item-count">${col.songIds.length} song${col.songIds.length !== 1 ? 's' : ''}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  modal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeAddToCollectionModal() {
+  document.getElementById('addToCollectionModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+// ── Discover State ──
+// _topSongsCache is preserved as the cache the search overlay reads from
+// (it's referenced in performSearch). It now holds the Last.fm chart.
+let _topSongsCache = [];
+let _trendingArtistsCache = [];
+let _trendingRange = 'week';   // week | month | year | all_time
+let _chartRegion = 'global';   // global | united states
+
+const SKELETON_ROWS = 10;
+
+function renderSkeletonRows(n) {
+  return Array.from({ length: n }).map(() => `
+    <div class="chart-row chart-skeleton">
+      <div class="skeleton-rank"></div>
+      <div class="skeleton-cover"></div>
+      <div class="skeleton-info">
+        <div class="skeleton-line skeleton-line-title"></div>
+        <div class="skeleton-line skeleton-line-sub"></div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function renderDiscover() {
+  // Both sections render in parallel; each handles its own loading state.
+  renderTrendingNow();
+  renderTopCharts();
+}
+
+// ── Trending Now (ListenBrainz) ──
+async function renderTrendingNow() {
+  const el = document.getElementById('trendingList');
+  if (!el) return;
+  el.innerHTML = renderSkeletonRows(SKELETON_ROWS);
+
+  const range = _trendingRange;
+  const artists = await fetchListenBrainzTrending(range);
+  // If the user switched ranges while we were fetching, abandon this paint.
+  if (range !== _trendingRange) return;
+  _trendingArtistsCache = artists;
+
+  if (!artists.length) {
+    el.innerHTML = '<p class="muted">Couldn\'t load trending artists. Try again later.</p>';
+    return;
+  }
+
+  // Render placeholders immediately, then fill in artwork as it arrives.
+  el.innerHTML = artists.map((a, i) => renderTrendingRow(a, i + 1)).join('');
+
+  // Lazy art enrichment in parallel (cached, so cheap on subsequent loads).
+  artists.forEach(async (a, i) => {
+    const cover = await enrichArt(a, 'artist');
+    if (range !== _trendingRange) return;
+    if (!cover) return;
+    const node = el.querySelector(`[data-trend-idx="${i}"] .chart-cover img`);
+    if (node) {
+      node.src = cover;
+    } else {
+      const wrap = el.querySelector(`[data-trend-idx="${i}"] .chart-cover`);
+      if (wrap) {
+        wrap.insertAdjacentHTML('beforeend',
+          `<img class="cover-img" src="${escapeHtml(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">`);
+      }
+    }
+  });
+}
+
+function renderTrendingRow(artist, rank) {
+  const item = { title: artist.name, artist: artist.name };
+  return `
+    <div class="chart-row trending-row" data-trend-idx="${rank - 1}"
+      data-title=""
+      data-artist="${escapeHtml(artist.name)}"
+      data-album=""
+      data-genre="">
+      <div class="chart-rank">${rank}</div>
+      <div class="chart-cover">${renderCoverArt(item)}</div>
+      <div class="chart-info">
+        <div class="chart-title">${escapeHtml(artist.name)}</div>
+        <div class="chart-artist">${formatListenCount(artist.listenCount)} listens</div>
+      </div>
+      <button class="chart-log-btn" type="button" aria-label="Log a song by this artist">+ Log</button>
+    </div>
+  `;
+}
+
+// ── Top Charts (Last.fm) ──
+async function renderTopCharts() {
+  const el = document.getElementById('chartsList');
+  if (!el) return;
+  el.innerHTML = renderSkeletonRows(SKELETON_ROWS);
+
+  const region = _chartRegion;
+  const tracks = await fetchLastFmTopTracks(region);
+  if (region !== _chartRegion) return;
+  _topSongsCache = tracks; // search overlay reads this
+
+  if (!tracks.length) {
+    el.innerHTML = '<p class="muted">Couldn\'t load chart. Try again later.</p>';
+    return;
+  }
+
+  el.innerHTML = tracks.map((t, i) => renderLastFmRow(t, i + 1)).join('');
+
+  // Lazy art enrichment.
+  tracks.forEach(async (t, i) => {
+    if (t.coverUrl) return;
+    const cover = await enrichArt(t, 'track');
+    if (region !== _chartRegion) return;
+    if (!cover) return;
+    t.coverUrl = cover;
+    const row = el.querySelector(`[data-chart-idx="${i}"]`);
+    if (!row) return;
+    row.dataset.cover = cover;
+    const wrap = row.querySelector('.chart-cover');
+    if (wrap && !wrap.querySelector('img')) {
+      wrap.insertAdjacentHTML('beforeend',
+        `<img class="cover-img" src="${escapeHtml(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">`);
+    }
+  });
+}
+
+function renderLastFmRow(t, rank) {
+  return `
+    <div class="chart-row" data-chart-idx="${rank - 1}"
+      data-title="${escapeHtml(t.title)}"
+      data-artist="${escapeHtml(t.artist)}"
+      data-album=""
+      data-genre=""
+      ${t.coverUrl ? `data-cover="${escapeHtml(t.coverUrl)}"` : ''}>
+      <div class="chart-rank">${rank}</div>
+      <div class="chart-cover">${renderCoverArt(t)}</div>
+      <div class="chart-info">
+        <div class="chart-title">${escapeHtml(t.title)}</div>
+        <div class="chart-artist">${escapeHtml(t.artist)}</div>
+      </div>
+      ${t.listeners ? `<div class="chart-genre">${formatListenCount(t.listeners)} listeners</div>` : ''}
+      <button class="chart-log-btn" type="button" aria-label="Log to journal">+ Log</button>
+    </div>
+  `;
+}
+
+// ── Album Detail Modal ──────────────────
+const albumModal = document.getElementById('albumModal');
+
+function openAlbumModal(albumMeta) {
+  if (!albumModal) return;
+  albumModal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  const titleEl = document.getElementById('albumModalTitle');
+  const headerEl = document.getElementById('albumModalHeader');
+  const tracksEl = document.getElementById('albumModalTracks');
+  if (titleEl) titleEl.textContent = albumMeta.title || 'Album';
+  if (headerEl) {
+    headerEl.innerHTML = `
+      <div class="album-modal-cover">${renderCoverArt(albumMeta)}</div>
+      <div class="album-modal-info">
+        <div class="album-modal-name">${escapeHtml(albumMeta.title || '')}</div>
+        <div class="album-modal-artist">${escapeHtml(albumMeta.artist || '')}</div>
+      </div>
+    `;
+  }
+  if (tracksEl) tracksEl.innerHTML = '<p class="muted chart-loading">Loading tracklist…</p>';
+
+  fetchAlbumDetail(albumMeta.albumId).then(detail => {
+    if (!albumModal.classList.contains('active')) return;
+    if (!detail || !detail.tracks.length) {
+      if (tracksEl) tracksEl.innerHTML = '<p class="muted">Tracklist unavailable.</p>';
+      return;
+    }
+    if (tracksEl) {
+      tracksEl.innerHTML = detail.tracks.map((t, i) => `
+        <div class="album-track-row"
+          data-title="${escapeHtml(t.title)}"
+          data-artist="${escapeHtml(t.artist)}"
+          data-album="${escapeHtml(detail.title)}"
+          ${detail.coverUrl ? `data-cover="${escapeHtml(detail.coverUrl)}"` : ''}>
+          <div class="album-track-num">${t.trackPosition || i + 1}</div>
+          <div class="album-track-info">
+            <div class="album-track-title">${escapeHtml(t.title)}</div>
+            <div class="album-track-artist">${escapeHtml(t.artist)}</div>
+          </div>
+          <div class="album-track-duration">${formatDuration(t.duration)}</div>
+          <button type="button" class="btn btn-primary btn-sm album-track-log">+ Log</button>
+        </div>
+      `).join('');
+    }
+  });
+}
+
+function closeAlbumModal() {
+  if (!albumModal) return;
+  albumModal.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderStats() {
+  const entries = getJournal();
+
+  document.getElementById('statTotal').textContent = entries.length;
+  const uniqueArtists = new Set(entries.map(e => e.artist.toLowerCase()));
+  document.getElementById('statArtists').textContent = uniqueArtists.size;
+  document.getElementById('statFives').textContent = entries.filter(e => e.rating === 5).length;
+
+  if (entries.length > 0) {
+    const avg = entries.reduce((s, e) => s + (e.rating || 0), 0) / entries.length;
+    document.getElementById('statAvg').textContent = avg.toFixed(1);
+  } else {
+    document.getElementById('statAvg').textContent = '—';
+  }
+
+  // Rating bars
+  const ratingBars = document.getElementById('ratingBars');
+  const counts = [0, 0, 0, 0, 0];
+  entries.forEach(e => {
+    const r = Math.round(e.rating);
+    if (r >= 1 && r <= 5) counts[r - 1]++;
+  });
+  const maxCount = Math.max(...counts, 1);
+
+  ratingBars.innerHTML = [5, 4, 3, 2, 1].map(r => `
+    <div class="rating-bar-row">
+      <div class="rating-bar-label">${'★'.repeat(r)}</div>
+      <div class="rating-bar-track">
+        <div class="rating-bar-fill" style="width: ${(counts[r - 1] / maxCount) * 100}%"></div>
+      </div>
+      <div class="rating-bar-count">${counts[r - 1]}</div>
+    </div>
+  `).join('');
+
+  // Top artists
+  const artistMap = {};
+  entries.forEach(e => {
+    const key = e.artist;
+    artistMap[key] = (artistMap[key] || 0) + 1;
+  });
+  const topArtists = Object.entries(artistMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const topArtistsList = document.getElementById('topArtistsList');
+
+  if (topArtists.length > 0) {
+    topArtistsList.innerHTML = topArtists.map(([name, count], i) => `
+      <div class="top-artist-row">
+        <div class="top-artist-rank">${i + 1}</div>
+        <div class="top-artist-name">${escapeHtml(name)}</div>
+        <div class="top-artist-count">${count} song${count !== 1 ? 's' : ''}</div>
+      </div>
+    `).join('');
+  } else {
+    topArtistsList.innerHTML = '<p class="muted">Log more songs to see your top artists.</p>';
+  }
+
+  // Genre breakdown
+  const genreMap = {};
+  entries.forEach(e => {
+    if (e.genre) genreMap[e.genre] = (genreMap[e.genre] || 0) + 1;
+  });
+  const genres = Object.entries(genreMap).sort((a, b) => b[1] - a[1]);
+  const genreBreakdown = document.getElementById('genreBreakdown');
+  const genreColors = {
+    pop: '#e8784e', rock: '#d44', 'hip-hop': '#e0a030', 'r&b': '#c060a0',
+    electronic: '#50b0e0', jazz: '#b08030', classical: '#8080c0', indie: '#60a060',
+    country: '#c09040', metal: '#808080', folk: '#a08060', soul: '#d07050',
+    blues: '#5080c0', latin: '#e06040', other: '#888'
+  };
+
+  if (genres.length > 0) {
+    const maxG = Math.max(...genres.map(g => g[1]), 1);
+    genreBreakdown.innerHTML = genres.map(([genre, count]) => `
+      <div class="genre-bar-row">
+        <div class="genre-bar-label">${escapeHtml(genre)}</div>
+        <div class="genre-bar-track">
+          <div class="genre-bar-fill" style="width: ${(count / maxG) * 100}%; background: ${genreColors[genre] || '#888'};"></div>
+        </div>
+        <div class="genre-bar-pct">${Math.round(count / entries.length * 100)}%</div>
+      </div>
+    `).join('');
+  } else {
+    genreBreakdown.innerHTML = '<p class="muted">Log more songs to see your genre breakdown.</p>';
+  }
+}
+
+function showDetail(id) {
+  const entry = getEntry(id);
+  if (!entry) return;
+  const view = document.getElementById('detailView');
+  view.innerHTML = renderDetailView(entry);
+  navigateTo('detail');
+}
+
+// ── Navigation ──────────────────────────
+let currentPage = 'home';
+let previousPage = 'home';
+
+function navigateTo(page) {
+  previousPage = currentPage;
+  currentPage = page;
+
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const target = document.querySelector(`.page[data-page="${page}"]`);
+  if (target) target.classList.add('active');
+
+  document.querySelectorAll('.nav-link').forEach(l => {
+    l.classList.toggle('active', l.dataset.page === page);
+  });
+
+  // Render page content
+  switch (page) {
+    case 'home': renderHome(); break;
+    case 'journal': renderJournal(); break;
+    case 'discover': renderDiscover(); break;
+    case 'stats': renderStats(); break;
+  }
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Modal ───────────────────────────────
+const logModal = document.getElementById('logModal');
+const logForm = document.getElementById('logForm');
+let selectedRating = 0;
+let currentTagRating = 0;
+let currentTags = [];
+let logPrefillExtras = {};
+let selectedLogCollections = [];
+
+function renderLogCollectionPicker() {
+  const picker = document.getElementById('logCollectionPicker');
+  const group = document.getElementById('logCollectionGroup');
+  if (!picker || !group) return;
+  const collections = getCollections();
+  if (!collections.length) {
+    group.style.display = 'none';
+    return;
+  }
+  group.style.display = '';
+  picker.innerHTML = collections.map(col => {
+    const sel = selectedLogCollections.includes(col.id) ? ' selected' : '';
+    return `<button type="button" class="log-col-chip${sel}" data-col-id="${col.id}">${escapeHtml(col.name)}</button>`;
+  }).join('');
+}
+
+// ── Star Rating Input (half-star) ───────
+function updateStarInput(container, rating) {
+  container.querySelectorAll('.star-input').forEach((el, i) => {
+    const n = i + 1;
+    let pct = 0;
+    if (rating >= n) pct = 100;
+    else if (rating >= n - 0.5) pct = 50;
+    el.querySelector('.sb-fg').style.width = pct + '%';
+  });
+}
+
+function getStarValueFromEvent(el, clientX) {
+  const rect = el.getBoundingClientRect();
+  const isLeft = (clientX - rect.left) < rect.width / 2;
+  const n = parseInt(el.dataset.value);
+  return isLeft ? n - 0.5 : n;
+}
+
+function bindStarInput(container, getValue, setValue) {
+  container.addEventListener('mousemove', (e) => {
+    const el = e.target.closest('.star-input');
+    if (!el) return;
+    updateStarInput(container, getStarValueFromEvent(el, e.clientX));
+  });
+  container.addEventListener('mouseleave', () => {
+    updateStarInput(container, getValue());
+  });
+  container.addEventListener('click', (e) => {
+    const el = e.target.closest('.star-input');
+    if (!el) return;
+    const val = getStarValueFromEvent(el, e.clientX);
+    setValue(val);
+    updateStarInput(container, val);
+  });
+}
+
+// ── Tag Ratings UI ──────────────────────
+function renderTagRatingsList() {
+  const list = document.getElementById('tagRatingsList');
+  if (!currentTags.length) {
+    list.innerHTML = '';
+    return;
+  }
+  list.innerHTML = currentTags.map((t, i) => `
+    <div class="tag-rating-chip">
+      <span class="tag-rating-chip-name">${escapeHtml(t.name)}</span>
+      <span class="tag-rating-chip-stars">${renderStars(t.rating)}</span>
+      <span class="tag-rating-chip-value">${formatRating(t.rating)}</span>
+      <button type="button" class="tag-remove" data-index="${i}" aria-label="Remove">×</button>
+    </div>
+  `).join('');
+}
+
+function resetTagInput() {
+  document.getElementById('tagNameInput').value = '';
+  currentTagRating = 0;
+  updateStarInput(document.getElementById('tagRatingStars'), 0);
+}
+
+function openLogModal(prefill = {}) {
+  if (!isLoggedIn()) {
+    openAuthModal('login', 'You need an account to log songs to your journal.');
+    return;
+  }
+  logModal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  logForm.reset();
+  selectedRating = 0;
+  currentTags = [];
+  currentTagRating = 0;
+  logPrefillExtras = {
+    coverUrl: prefill.coverUrl || null,
+    mbId: prefill.mbId || null,
+    releaseId: prefill.releaseId || null,
+    releaseGroupId: prefill.releaseGroupId || null,
+  };
+  selectedLogCollections = [];
+  updateStarInput(document.getElementById('starRating'), 0);
+  updateStarInput(document.getElementById('tagRatingStars'), 0);
+  document.getElementById('starRatingValue').textContent = '—';
+  renderTagRatingsList();
+  renderLogCollectionPicker();
+
+  // Set today's date
+  document.getElementById('songDate').value = new Date().toISOString().split('T')[0];
+
+  // Prefill if provided
+  if (prefill.title) document.getElementById('songTitle').value = prefill.title;
+  if (prefill.artist) document.getElementById('songArtist').value = prefill.artist;
+  if (prefill.album) document.getElementById('songAlbum').value = prefill.album;
+  if (prefill.genre) document.getElementById('songGenre').value = prefill.genre;
+
+  setTimeout(() => document.getElementById('songTitle').focus(), 100);
+}
+
+function closeLogModal() {
+  logModal.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+// ── Search ──────────────────────────────
+const searchOverlay = document.getElementById('searchOverlay');
+const searchInput = document.getElementById('searchInput');
+const searchResults = document.getElementById('searchResults');
+
+function openSearch() {
+  searchOverlay.classList.add('active');
+  searchInput.value = '';
+  searchResults.innerHTML = '';
+  setTimeout(() => searchInput.focus(), 100);
+}
+
+function closeSearch() {
+  searchOverlay.classList.remove('active');
+}
+
+let mbSearchToken = 0;
+
+function performSearch(query) {
+  if (!query.trim()) {
+    searchResults.innerHTML = '';
+    return;
+  }
+
+  const q = query.toLowerCase();
+  const journal = getJournal();
+
+  // Search journal entries
+  const journalMatches = journal.filter(e =>
+    e.title.toLowerCase().includes(q) ||
+    e.artist.toLowerCase().includes(q) ||
+    (e.album && e.album.toLowerCase().includes(q))
+  ).slice(0, 5);
+
+  // Search currently-cached chart songs (instant local match)
+  const discoverMatches = (_topSongsCache || []).filter(s =>
+    s.title.toLowerCase().includes(q) ||
+    s.artist.toLowerCase().includes(q) ||
+    (s.album && s.album.toLowerCase().includes(q))
+  ).filter(dm => !journalMatches.some(jm => jm.title === dm.title && jm.artist === dm.artist))
+    .slice(0, 5);
+
+  let html = '';
+
+  if (journalMatches.length > 0) {
+    html += '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Your Journal</div>';
+    journalMatches.forEach(e => {
+      const hue = getCoverHue(e.title, e.artist);
+      const cover = e.coverUrl
+        ? `<img class="search-result-cover-img" src="${escapeHtml(e.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+        : '';
+      html += `
+        <div class="search-result-item" data-action="detail" data-id="${e.id}">
+          <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
+            ${cover}
+          </div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escapeHtml(e.title)}</div>
+            <div class="search-result-meta">${escapeHtml(e.artist)} · ★ ${e.rating || '—'}</div>
+          </div>
+          <div class="search-result-action">View</div>
+        </div>
+      `;
+    });
+  }
+
+  if (discoverMatches.length > 0) {
+    html += '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Trending Now</div>';
+    discoverMatches.forEach(s => {
+      const hue = getCoverHue(s.title, s.artist);
+      const cover = s.coverUrl
+        ? `<img class="search-result-cover-img" src="${escapeHtml(s.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+        : '';
+      html += `
+        <div class="search-result-item" data-action="log"
+          data-title="${escapeHtml(s.title)}"
+          data-artist="${escapeHtml(s.artist)}"
+          data-album="${escapeHtml(s.album || '')}"
+          data-genre="${escapeHtml((s.genres && s.genres[0]) || '')}"
+          data-cover="${escapeHtml(s.coverUrl || '')}">
+          <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
+            ${cover}
+          </div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escapeHtml(s.title)}</div>
+            <div class="search-result-meta">${escapeHtml(s.artist)}</div>
+          </div>
+          <div class="search-result-action">+ Log</div>
+        </div>
+      `;
+    });
+  }
+
+  // Placeholder for live MusicBrainz results — filled async below.
+  html += '<div id="mbResultsSection"><div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Music Database</div><div class="mb-loading">Searching MusicBrainz…</div></div>';
+
+  searchResults.innerHTML = html;
+
+  // Kick off the MusicBrainz search. Token-guard against stale responses.
+  const myToken = ++mbSearchToken;
+  searchMusicBrainz(query).then(results => {
+    if (myToken !== mbSearchToken) return;
+    const section = document.getElementById('mbResultsSection');
+    if (!section) return;
+    if (!results.length) {
+      section.querySelector('.mb-loading').textContent = 'No matches in MusicBrainz.';
+      return;
+    }
+    section.innerHTML = '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Music Database</div>' +
+      results.map(r => {
+        const hue = getCoverHue(r.title, r.artist);
+        const cover = r.coverUrl
+          ? `<img class="search-result-cover-img" src="${escapeHtml(r.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+          : '';
+        return `
+          <div class="search-result-item" data-action="log"
+            data-title="${escapeHtml(r.title)}"
+            data-artist="${escapeHtml(r.artist)}"
+            data-album="${escapeHtml(r.album || '')}"
+            data-genre=""
+            data-cover="${escapeHtml(r.coverUrl || '')}"
+            data-mbid="${escapeHtml(r.mbId)}"
+            data-rid="${escapeHtml(r.releaseId || '')}"
+            data-rgid="${escapeHtml(r.releaseGroupId || '')}">
+            <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
+              ${cover}
+            </div>
+            <div class="search-result-info">
+              <div class="search-result-title">${escapeHtml(r.title)}</div>
+              <div class="search-result-meta">${escapeHtml(r.artist)}${r.album ? ' · ' + escapeHtml(r.album) : ''}</div>
+            </div>
+            <div class="search-result-action">+ Log</div>
+          </div>
+        `;
+      }).join('');
+  });
+}
+
+// ── Auth Modal ──────────────────────────
+const authModal = document.getElementById('authModal');
+const authForm = document.getElementById('authForm');
+const authTitle = document.getElementById('authTitle');
+const authSubtitle = document.getElementById('authSubtitle');
+const authSubmit = document.getElementById('authSubmit');
+const authSwitchText = document.getElementById('authSwitchText');
+const authSwitchLink = document.getElementById('authSwitchLink');
+const authError = document.getElementById('authError');
+
+let authMode = 'login'; // 'login' or 'signup'
+
+function openAuthModal(mode = 'login', message = null) {
+  authMode = mode;
+  updateAuthModalMode();
+  authModal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  authForm.reset();
+  hideAuthError();
+  if (message) {
+    authSubtitle.textContent = message;
+  }
+  setTimeout(() => document.getElementById('authUsername').focus(), 100);
+}
+
+function closeAuthModal() {
+  authModal.classList.remove('active');
+  document.body.style.overflow = '';
+  hideAuthError();
+}
+
+function updateAuthModalMode() {
+  if (authMode === 'signup') {
+    authTitle.textContent = 'Create Account';
+    authSubtitle.textContent = 'Start your personal music journal.';
+    authSubmit.textContent = 'Sign Up';
+    authSwitchText.textContent = 'Already have an account?';
+    authSwitchLink.textContent = 'Log in';
+    document.getElementById('authPassword').setAttribute('autocomplete', 'new-password');
+  } else {
+    authTitle.textContent = 'Welcome Back';
+    authSubtitle.textContent = 'Sign in to access your personal music journal.';
+    authSubmit.textContent = 'Sign In';
+    authSwitchText.textContent = "Don't have an account?";
+    authSwitchLink.textContent = 'Sign up';
+    document.getElementById('authPassword').setAttribute('autocomplete', 'current-password');
+  }
+}
+
+function showAuthError(msg) {
+  authError.textContent = msg;
+  authError.classList.add('active');
+}
+
+function hideAuthError() {
+  authError.classList.remove('active');
+  authError.textContent = '';
+}
+
+function updateAuthUI() {
+  const user = getCurrentUser();
+  const authButtons = document.getElementById('authButtons');
+  const userMenu = document.getElementById('userMenu');
+
+  if (user) {
+    authButtons.style.display = 'none';
+    userMenu.style.display = 'block';
+    document.getElementById('userAvatar').textContent = user[0].toUpperCase();
+    document.getElementById('userName').textContent = user;
+    document.getElementById('userDropdownName').textContent = user;
+  } else {
+    authButtons.style.display = 'flex';
+    userMenu.style.display = 'none';
+  }
+}
+
+// ── Event Listeners ─────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // Initial render
+  updateAuthUI();
+  renderHome();
+  renderDiscover();
+
+  // Auth buttons
+  document.getElementById('openLoginBtn').addEventListener('click', () => openAuthModal('login'));
+  document.getElementById('openSignupBtn').addEventListener('click', () => openAuthModal('signup'));
+  document.getElementById('closeAuthModal').addEventListener('click', closeAuthModal);
+  authModal.addEventListener('click', (e) => {
+    if (e.target === authModal) closeAuthModal();
+  });
+
+  // Switch between login / signup
+  authSwitchLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    authMode = authMode === 'login' ? 'signup' : 'login';
+    updateAuthModalMode();
+    hideAuthError();
+  });
+
+  // Submit auth form
+  authForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    hideAuthError();
+    const username = document.getElementById('authUsername').value;
+    const password = document.getElementById('authPassword').value;
+
+    const result = authMode === 'signup'
+      ? signup(username, password)
+      : login(username, password);
+
+    if (result.error) {
+      showAuthError(result.error);
+      return;
+    }
+
+    closeAuthModal();
+    updateAuthUI();
+    showToast(authMode === 'signup' ? `Welcome, ${result.username}!` : `Welcome back, ${result.username}!`);
+    renderHome();
+    if (currentPage === 'journal') renderJournal();
+    if (currentPage === 'stats') renderStats();
+  });
+
+  // User dropdown toggle
+  const userChip = document.getElementById('userChip');
+  const userDropdown = document.getElementById('userDropdown');
+  userChip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    userDropdown.classList.toggle('active');
+  });
+  document.addEventListener('click', (e) => {
+    if (!userDropdown.contains(e.target) && e.target !== userChip) {
+      userDropdown.classList.remove('active');
+    }
+  });
+
+  // Logout
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    logout();
+    userDropdown.classList.remove('active');
+    updateAuthUI();
+    showToast('Logged out.');
+    navigateTo('home');
+  });
+
+  // Navigation — only attach to nav links and explicit nav triggers, NOT .page containers
+  document.querySelectorAll('[data-page]').forEach(el => {
+    if (el.classList.contains('page')) return;
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const page = el.dataset.page;
+      if (page && page !== 'detail') navigateTo(page);
+    });
+  });
+
+  // Open log modal
+  document.getElementById('openLogModal').addEventListener('click', () => openLogModal());
+  document.getElementById('heroLogBtn').addEventListener('click', () => openLogModal());
+  document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('open-log-modal')) openLogModal();
+  });
+
+  // Close log modal
+  document.getElementById('closeLogModal').addEventListener('click', closeLogModal);
+  document.getElementById('cancelLog').addEventListener('click', closeLogModal);
+  logModal.addEventListener('click', (e) => {
+    if (e.target === logModal) closeLogModal();
+  });
+
+  // ── Log modal autocomplete (iTunes Search) ──
+  // Suggests songs as the user types into the title or artist fields, and
+  // fills the entire form (title, artist, album, cover art) on selection.
+  const titleInput = document.getElementById('songTitle');
+  const artistInput = document.getElementById('songArtist');
+  const titleSuggest = document.getElementById('titleSuggestions');
+  const artistSuggest = document.getElementById('artistSuggestions');
+
+  function applySuggestion(item) {
+    titleInput.value = item.title || '';
+    artistInput.value = item.artist || '';
+    document.getElementById('songAlbum').value = item.album || '';
+    if (item.genre) {
+      const genreSelect = document.getElementById('songGenre');
+      const want = item.genre.toLowerCase();
+      const matched = Array.from(genreSelect.options).find(o => o.value && want.includes(o.value));
+      if (matched) genreSelect.value = matched.value;
+    }
+    logPrefillExtras.coverUrl = item.coverUrl || logPrefillExtras.coverUrl || null;
+    titleSuggest.classList.remove('active');
+    artistSuggest.classList.remove('active');
+  }
+
+  function renderSuggestions(container, items) {
+    if (!items.length) {
+      container.classList.remove('active');
+      container.innerHTML = '';
+      return;
+    }
+    container.innerHTML = items.map((s, i) => `
+      <div class="suggestion-item" data-index="${i}">
+        ${s.coverUrl
+          ? `<img class="suggestion-cover" src="${escapeHtml(s.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`
+          : '<div class="suggestion-cover suggestion-cover-empty"></div>'}
+        <div class="suggestion-info">
+          <div class="suggestion-title">${escapeHtml(s.title)}</div>
+          <div class="suggestion-meta">${escapeHtml(s.artist)}${s.album ? ' · ' + escapeHtml(s.album) : ''}</div>
+        </div>
+      </div>
+    `).join('');
+    container._items = items;
+    container.classList.add('active');
+  }
+
+  function bindAutocomplete(input, container) {
+    let token = 0;
+    let timer;
+    input.addEventListener('input', () => {
+      const q = input.value;
+      clearTimeout(timer);
+      if (q.trim().length < 2) {
+        container.classList.remove('active');
+        return;
+      }
+      timer = setTimeout(async () => {
+        const myToken = ++token;
+        const results = await searchITunesSongs(q);
+        if (myToken !== token) return; // stale
+        renderSuggestions(container, results);
+      }, 280);
+    });
+    input.addEventListener('focus', () => {
+      if (container.innerHTML) container.classList.add('active');
+    });
+    input.addEventListener('blur', () => {
+      // Delay so click on a suggestion still registers.
+      setTimeout(() => container.classList.remove('active'), 150);
+    });
+    container.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      e.preventDefault();
+      const idx = parseInt(item.dataset.index, 10);
+      const data = container._items && container._items[idx];
+      if (data) applySuggestion(data);
+    });
+  }
+
+  bindAutocomplete(titleInput, titleSuggest);
+  bindAutocomplete(artistInput, artistSuggest);
+
+  // Main star rating (half-star)
+  const starRatingEl = document.getElementById('starRating');
+  const starRatingValue = document.getElementById('starRatingValue');
+  bindStarInput(
+    starRatingEl,
+    () => selectedRating,
+    (v) => {
+      selectedRating = v;
+      starRatingValue.textContent = formatRating(v);
+    }
+  );
+
+  // Tag rating stars
+  const tagRatingStars = document.getElementById('tagRatingStars');
+  bindStarInput(
+    tagRatingStars,
+    () => currentTagRating,
+    (v) => { currentTagRating = v; }
+  );
+
+  // Add tag button
+  document.getElementById('addTagBtn').addEventListener('click', () => {
+    const nameInput = document.getElementById('tagNameInput');
+    const name = nameInput.value.trim();
+    if (!name) {
+      showToast('Enter a category name (e.g. vocals).', 'error');
+      return;
+    }
+    if (!currentTagRating) {
+      showToast('Give the category a rating.', 'error');
+      return;
+    }
+    if (currentTags.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+      showToast('You already added that category.', 'error');
+      return;
+    }
+    currentTags.push({ name, rating: currentTagRating });
+    renderTagRatingsList();
+    resetTagInput();
+    nameInput.focus();
+  });
+
+  // Allow Enter in tag name input to add the tag
+  document.getElementById('tagNameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('addTagBtn').click();
+    }
+  });
+
+  // Remove tag (delegated)
+  document.getElementById('tagRatingsList').addEventListener('click', (e) => {
+    const btn = e.target.closest('.tag-remove');
+    if (!btn) return;
+    const idx = parseInt(btn.dataset.index);
+    currentTags.splice(idx, 1);
+    renderTagRatingsList();
+  });
+
+  // Collection picker chip toggle
+  document.getElementById('logCollectionPicker').addEventListener('click', (e) => {
+    const chip = e.target.closest('.log-col-chip');
+    if (!chip) return;
+    const colId = chip.dataset.colId;
+    if (selectedLogCollections.includes(colId)) {
+      selectedLogCollections = selectedLogCollections.filter(id => id !== colId);
+      chip.classList.remove('selected');
+    } else {
+      selectedLogCollections.push(colId);
+      chip.classList.add('selected');
+    }
+  });
+
+  // Submit log form
+  logForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const entry = {
+      title: document.getElementById('songTitle').value.trim(),
+      artist: document.getElementById('songArtist').value.trim(),
+      album: document.getElementById('songAlbum').value.trim(),
+      genre: document.getElementById('songGenre').value,
+      date: document.getElementById('songDate').value,
+      rating: selectedRating || 3,
+      review: document.getElementById('songReview').value.trim(),
+      favorite: document.getElementById('songFavorite').checked,
+      tags: [...currentTags],
+      coverUrl: logPrefillExtras.coverUrl || null,
+      mbId: logPrefillExtras.mbId || null,
+      releaseId: logPrefillExtras.releaseId || null,
+      releaseGroupId: logPrefillExtras.releaseGroupId || null,
+    };
+
+    if (!entry.title || !entry.artist) {
+      showToast('Please fill in the song title and artist.', 'error');
+      return;
+    }
+
+    const saved = addEntry(entry);
+    if (entry.mbId) {
+      cacheCatalogItem({
+        mbId: entry.mbId,
+        title: entry.title,
+        artist: entry.artist,
+        album: entry.album,
+        releaseId: entry.releaseId,
+        releaseGroupId: entry.releaseGroupId,
+        coverUrl: entry.coverUrl,
+        date: entry.date,
+      });
+    }
+    // Add to selected collections
+    if (saved && selectedLogCollections.length) {
+      selectedLogCollections.forEach(colId => addSongToCollection(colId, saved.id));
+    }
+    closeLogModal();
+    const colCount = selectedLogCollections.length;
+    const colMsg = colCount ? ` and added to ${colCount} collection${colCount > 1 ? 's' : ''}` : '';
+    showToast(`"${entry.title}" added to your journal${colMsg}!`);
+    renderHome();
+    if (currentPage === 'journal') renderJournal();
+    if (currentPage === 'stats') renderStats();
+  });
+
+  // Search toggle
+  document.querySelector('.search-toggle').addEventListener('click', openSearch);
+  searchOverlay.addEventListener('click', (e) => {
+    if (e.target === searchOverlay) closeSearch();
+  });
+
+  // Search input (debounced so we don't hammer MusicBrainz on every keystroke)
+  let searchDebounce;
+  searchInput.addEventListener('input', (e) => {
+    const v = e.target.value;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => performSearch(v), 250);
+  });
+
+  // Search result clicks
+  searchResults.addEventListener('click', (e) => {
+    const item = e.target.closest('.search-result-item');
+    if (!item) return;
+
+    if (item.dataset.action === 'detail') {
+      closeSearch();
+      showDetail(item.dataset.id);
+    } else if (item.dataset.action === 'log') {
+      closeSearch();
+      openLogModal({
+        title: item.dataset.title,
+        artist: item.dataset.artist,
+        album: item.dataset.album,
+        genre: item.dataset.genre,
+        coverUrl: item.dataset.cover || null,
+        mbId: item.dataset.mbid || null,
+        releaseId: item.dataset.rid || null,
+        releaseGroupId: item.dataset.rgid || null,
+      });
+    }
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (searchOverlay.classList.contains('active')) closeSearch();
+      else if (authModal.classList.contains('active')) closeAuthModal();
+      else if (logModal.classList.contains('active')) closeLogModal();
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      if (searchOverlay.classList.contains('active')) closeSearch();
+      else openSearch();
+    }
+  });
+
+  // Song card clicks (delegated)
+  document.addEventListener('click', (e) => {
+    const card = e.target.closest('.song-card');
+    if (card && card.dataset.id) {
+      showDetail(card.dataset.id);
+    }
+  });
+
+  // Journal entry clicks
+  document.addEventListener('click', (e) => {
+    const entry = e.target.closest('.journal-entry');
+    if (entry && entry.dataset.id) {
+      showDetail(entry.dataset.id);
+    }
+  });
+
+  // Discover card / chart row click — open log modal with prefill
+  document.addEventListener('click', (e) => {
+    const card = e.target.closest('.discover-card, .chart-row');
+    if (!card || card.classList.contains('chart-skeleton')) return;
+    openLogModal({
+      title: card.dataset.title || '',
+      artist: card.dataset.artist || '',
+      album: card.dataset.album || '',
+      genre: card.dataset.genre || '',
+      coverUrl: card.dataset.cover || null,
+    });
+  });
+
+  // Album tracklist modal — log a track row, or close
+  document.addEventListener('click', (e) => {
+    if (e.target.id === 'closeAlbumModal' || e.target.closest('#closeAlbumModal')) {
+      closeAlbumModal();
+      return;
+    }
+    if (e.target === albumModal) {
+      closeAlbumModal();
+      return;
+    }
+    const trackRow = e.target.closest('.album-track-row');
+    if (trackRow) {
+      closeAlbumModal();
+      openLogModal({
+        title: trackRow.dataset.title,
+        artist: trackRow.dataset.artist,
+        album: trackRow.dataset.album,
+        coverUrl: trackRow.dataset.cover || null,
+      });
+    }
+  });
+
+  // Discover tabs — ListenBrainz time range + Last.fm region
+  document.addEventListener('click', (e) => {
+    const rangeTab = e.target.closest('#trendingTabs .discover-tab');
+    if (rangeTab) {
+      const range = rangeTab.dataset.range;
+      if (range && range !== _trendingRange) {
+        _trendingRange = range;
+        document.querySelectorAll('#trendingTabs .discover-tab').forEach(t =>
+          t.classList.toggle('active', t === rangeTab));
+        renderTrendingNow();
+      }
+      return;
+    }
+    const regionTab = e.target.closest('#chartsTabs .discover-tab');
+    if (regionTab) {
+      const region = regionTab.dataset.region;
+      if (region && region !== _chartRegion) {
+        _chartRegion = region;
+        document.querySelectorAll('#chartsTabs .discover-tab').forEach(t =>
+          t.classList.toggle('active', t === regionTab));
+        renderTopCharts();
+      }
+    }
+  });
+
+  // Detail back button
+  document.addEventListener('click', (e) => {
+    if (e.target.id === 'detailBack' || e.target.closest('#detailBack')) {
+      navigateTo(previousPage);
+    }
+  });
+
+  // Detail delete button
+  document.addEventListener('click', (e) => {
+    const del = e.target.closest('#detailDelete');
+    if (del) {
+      if (confirm('Delete this entry from your journal?')) {
+        deleteEntry(del.dataset.id);
+        showToast('Entry deleted.');
+        navigateTo(previousPage);
+      }
+    }
+  });
+
+  // Journal filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderJournal(btn.dataset.filter, document.getElementById('sortSelect').value);
+    });
+  });
+
+  // Journal sort
+  document.getElementById('sortSelect').addEventListener('change', (e) => {
+    const activeFilter = document.querySelector('.filter-btn.active')?.dataset.filter || 'all';
+    renderJournal(activeFilter, e.target.value);
+  });
+
+  // Close album modal on Escape
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && albumModal && albumModal.classList.contains('active')) {
+      closeAlbumModal();
+    }
+  });
+
+  // ── Journal sub-tabs ──
+  document.addEventListener('click', (e) => {
+    const tab = e.target.closest('.journal-tab');
+    if (!tab) return;
+    const name = tab.dataset.jtab;
+    if (name) showJournalSubpage(name);
+  });
+
+  // ── Collections ──
+  const createCollectionModal = document.getElementById('createCollectionModal');
+  const createCollectionForm = document.getElementById('createCollectionForm');
+
+  function openCreateCollectionModal() {
+    if (!isLoggedIn()) {
+      openAuthModal('login', 'You need an account to create collections.');
+      return;
+    }
+    createCollectionModal.classList.add('active');
+    document.body.style.overflow = 'hidden';
+    createCollectionForm.reset();
+    setTimeout(() => document.getElementById('collectionName').focus(), 100);
+  }
+
+  function closeCreateCollectionModal() {
+    createCollectionModal.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+
+  document.getElementById('openCreateCollection').addEventListener('click', openCreateCollectionModal);
+  document.getElementById('closeCreateCollectionModal').addEventListener('click', closeCreateCollectionModal);
+  document.getElementById('cancelCreateCollection').addEventListener('click', closeCreateCollectionModal);
+  createCollectionModal.addEventListener('click', (e) => {
+    if (e.target === createCollectionModal) closeCreateCollectionModal();
+  });
+
+  createCollectionForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = document.getElementById('collectionName').value.trim();
+    if (!name) return;
+    const desc = document.getElementById('collectionDesc').value.trim();
+    createCollection(name, desc);
+    closeCreateCollectionModal();
+    showToast(`Collection "${name}" created!`);
+    renderCollections();
+  });
+
+  // Empty state create button
+  document.addEventListener('click', (e) => {
+    if (e.target.id === 'emptyCreateCollection') openCreateCollectionModal();
+  });
+
+  // Collection card click → show detail
+  document.addEventListener('click', (e) => {
+    const card = e.target.closest('.collection-card');
+    if (!card) return;
+    const colId = card.dataset.collectionId;
+    if (colId) {
+      renderCollectionDetail(colId);
+      showJournalSubpage('collection-detail');
+    }
+  });
+
+  // Collection detail — back button
+  document.addEventListener('click', (e) => {
+    if (e.target.id === 'collectionBack' || e.target.closest('#collectionBack')) {
+      _activeCollectionId = null;
+      showJournalSubpage('collections');
+    }
+  });
+
+  // Collection detail — delete collection
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('#deleteCollectionBtn');
+    if (!btn) return;
+    if (confirm('Delete this collection? Songs will stay in your journal.')) {
+      deleteCollection(btn.dataset.id);
+      showToast('Collection deleted.');
+      _activeCollectionId = null;
+      showJournalSubpage('collections');
+    }
+  });
+
+  // Collection detail — remove song from collection
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.collection-song-remove');
+    if (btn) {
+      e.stopPropagation();
+      removeSongFromCollection(btn.dataset.collectionId, btn.dataset.songId);
+      renderCollectionDetail(btn.dataset.collectionId);
+      showToast('Song removed from collection.');
+      return;
+    }
+    // Click a song row → go to detail
+    const row = e.target.closest('.collection-song-row');
+    if (row && row.dataset.id) {
+      showDetail(row.dataset.id);
+    }
+  });
+
+  // Detail view — add to collection button
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('#detailAddToCollection');
+    if (btn) openAddToCollectionModal(btn.dataset.id);
+  });
+
+  // Add to Collection modal — close
+  document.getElementById('closeAddToCollectionModal').addEventListener('click', closeAddToCollectionModal);
+  document.getElementById('addToCollectionModal').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('addToCollectionModal')) closeAddToCollectionModal();
+  });
+
+  // Add to Collection modal — toggle song in collection
+  document.addEventListener('click', (e) => {
+    const item = e.target.closest('.add-to-collection-item');
+    if (!item) return;
+    const colId = item.dataset.collectionId;
+    const songId = item.dataset.songId;
+    if (item.classList.contains('in-collection')) {
+      removeSongFromCollection(colId, songId);
+      item.classList.remove('in-collection');
+      const countEl = item.querySelector('.add-to-collection-item-count');
+      const col = getCollection(colId);
+      if (countEl && col) countEl.textContent = `${col.songIds.length} song${col.songIds.length !== 1 ? 's' : ''}`;
+      showToast('Removed from collection.');
+    } else {
+      const added = addSongToCollection(colId, songId);
+      if (added) {
+        item.classList.add('in-collection');
+        const countEl = item.querySelector('.add-to-collection-item-count');
+        const col = getCollection(colId);
+        if (countEl && col) countEl.textContent = `${col.songIds.length} song${col.songIds.length !== 1 ? 's' : ''}`;
+        showToast('Added to collection!');
+      }
+    }
+  });
+
+  // Escape closes collection modals
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (createCollectionModal.classList.contains('active')) closeCreateCollectionModal();
+      if (document.getElementById('addToCollectionModal').classList.contains('active')) closeAddToCollectionModal();
+    }
+  });
+});
