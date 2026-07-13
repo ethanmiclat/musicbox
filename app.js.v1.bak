@@ -1373,138 +1373,368 @@ function closeLogModal() {
 const searchOverlay = document.getElementById('searchOverlay');
 const searchInput = document.getElementById('searchInput');
 const searchResults = document.getElementById('searchResults');
+let _searchSelectedIdx = -1;
+let _searchToken = 0;
 
 function openSearch() {
   searchOverlay.classList.add('active');
   searchInput.value = '';
-  searchResults.innerHTML = '';
+  _searchSelectedIdx = -1;
+  renderSearchPreState();
   setTimeout(() => searchInput.focus(), 100);
 }
 
 function closeSearch() {
   searchOverlay.classList.remove('active');
+  _searchSelectedIdx = -1;
 }
 
-let mbSearchToken = 0;
+// ── Section header helper ──
+function searchSectionHeader(label) {
+  return `<div class="search-section-label">${escapeHtml(label)}</div>`;
+}
 
-function performSearch(query) {
+// ── Result card builder ──
+function searchResultCard(opts) {
+  // opts: { action, id, title, artist, album, genre, cover, mbid, rid, rgid, type, listeners, rating }
+  const hue = getCoverHue(opts.title || '', opts.artist || '');
+  const coverImg = opts.cover
+    ? `<img class="search-result-cover-img" src="${escapeHtml(opts.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+    : '';
+  const badge = opts.type ? `<span class="search-badge search-badge-${opts.type.toLowerCase()}">${escapeHtml(opts.type)}</span>` : '';
+  const listenersStr = opts.listeners ? `<span class="search-listeners">${formatListenCount(opts.listeners)} listeners</span>` : '';
+  const ratingStr = opts.rating ? `<span class="search-rating">★ ${opts.rating}</span>` : '';
+  const metaParts = [escapeHtml(opts.artist || '')];
+  if (opts.album) metaParts.push(escapeHtml(opts.album));
+  const metaText = metaParts.join(' · ');
+
+  const dataAttrs = [
+    `data-action="${opts.action || 'log'}"`,
+    opts.id ? `data-id="${opts.id}"` : '',
+    opts.title ? `data-title="${escapeHtml(opts.title)}"` : '',
+    opts.artist ? `data-artist="${escapeHtml(opts.artist)}"` : '',
+    `data-album="${escapeHtml(opts.album || '')}"`,
+    `data-genre="${escapeHtml(opts.genre || '')}"`,
+    opts.cover ? `data-cover="${escapeHtml(opts.cover)}"` : '',
+    opts.mbid ? `data-mbid="${escapeHtml(opts.mbid)}"` : '',
+    opts.rid ? `data-rid="${escapeHtml(opts.rid)}"` : '',
+    opts.rgid ? `data-rgid="${escapeHtml(opts.rgid)}"` : '',
+  ].filter(Boolean).join(' ');
+
+  return `
+    <div class="search-result-item" ${dataAttrs}>
+      <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
+        ${coverImg}
+      </div>
+      <div class="search-result-info">
+        <div class="search-result-title-row">
+          <span class="search-result-title">${escapeHtml(opts.title || '')}</span>
+          ${badge}
+        </div>
+        <div class="search-result-meta">${metaText}</div>
+      </div>
+      <div class="search-result-right">
+        ${listenersStr}${ratingStr}
+        <span class="search-result-action">${opts.action === 'detail' ? 'View' : '+ Log'}</span>
+      </div>
+    </div>
+  `;
+}
+
+// ── Pre-search state (empty query) ──
+function renderSearchPreState() {
+  const journal = getJournal();
+  if (!journal.length) {
+    searchResults.innerHTML = '<div class="search-empty">Start typing to search for songs, artists, or albums...</div>';
+    return;
+  }
+
+  let html = '';
+
+  // Recently Logged (last 5)
+  const recent = journal.slice(0, 5);
+  html += searchSectionHeader('Recently Logged');
+  html += recent.map(e => searchResultCard({
+    action: 'detail', id: e.id, title: e.title, artist: e.artist,
+    album: e.album, cover: e.coverUrl, type: 'Song', rating: e.rating,
+  })).join('');
+
+  // Top Artists (top 3)
+  const artistCounts = {};
+  journal.forEach(e => { artistCounts[e.artist] = (artistCounts[e.artist] || 0) + 1; });
+  const topArtists = Object.entries(artistCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  if (topArtists.length) {
+    html += searchSectionHeader('Your Top Artists');
+    html += topArtists.map(([name, count]) => {
+      // Find the most recent song by this artist for cover art
+      const sample = journal.find(e => e.artist === name);
+      return searchResultCard({
+        action: 'log', title: '', artist: name, cover: sample ? sample.coverUrl : null,
+        type: 'Artist', listeners: null,
+      }).replace(
+        '<span class="search-result-title"></span>',
+        `<span class="search-result-title">${escapeHtml(name)}</span>`
+      ).replace(
+        `<div class="search-result-meta">${escapeHtml(name)}</div>`,
+        `<div class="search-result-meta">${count} song${count !== 1 ? 's' : ''} logged</div>`
+      );
+    }).join('');
+  }
+
+  searchResults.innerHTML = html;
+}
+
+// ── Skeleton loading ──
+function renderSearchSkeleton() {
+  return Array.from({ length: 5 }).map(() => `
+    <div class="search-result-item search-skeleton">
+      <div class="search-result-cover skeleton-shimmer"></div>
+      <div class="search-result-info">
+        <div class="skeleton-line skeleton-shimmer" style="width:55%;height:14px;margin-bottom:6px;border-radius:4px;"></div>
+        <div class="skeleton-line skeleton-shimmer" style="width:35%;height:11px;border-radius:4px;"></div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Smart query type detection ──
+function detectQueryType(query, journal) {
+  const q = query.toLowerCase().trim();
+  // Check if query matches a known artist name closely
+  const artists = new Set(journal.map(e => e.artist.toLowerCase()));
+  if (artists.has(q)) return 'artist';
+  // Check chart cache
+  const chartArtists = (_topSongsCache || []).map(s => s.artist.toLowerCase());
+  if (chartArtists.includes(q)) return 'artist';
+  const trendArtists = (_trendingArtistsCache || []).map(a => a.name.toLowerCase());
+  if (trendArtists.includes(q)) return 'artist';
+  return null; // unknown — show all types
+}
+
+// ── Last.fm track search for listener data ──
+async function searchLastFmTracks(query) {
+  const q = (query || '').trim();
+  if (q.length < 2) return [];
+  try {
+    const url = `https://ws.audioscrobbler.com/2.0/?method=track.search&track=${encodeURIComponent(q)}&api_key=${LASTFM_API_KEY}&format=json&limit=12`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const tracks = (data.results && data.results.trackmatches && data.results.trackmatches.track) || [];
+    return tracks.map(t => ({
+      title: t.name || '',
+      artist: t.artist || '',
+      listeners: parseInt(t.listeners, 10) || 0,
+      url: t.url || '',
+      coverUrl: null, // Last.fm images are placeholders; enriched via iTunes below
+    })).filter(t => t.title && t.artist);
+  } catch {
+    return [];
+  }
+}
+
+// ── Main search ──
+async function performSearch(query) {
   if (!query.trim()) {
-    searchResults.innerHTML = '';
+    renderSearchPreState();
+    _searchSelectedIdx = -1;
     return;
   }
 
   const q = query.toLowerCase();
   const journal = getJournal();
+  const token = ++_searchToken;
+  const queryType = detectQueryType(query, journal);
 
-  // Search journal entries
+  // ── Journal matches (instant) ──
   const journalMatches = journal.filter(e =>
     e.title.toLowerCase().includes(q) ||
     e.artist.toLowerCase().includes(q) ||
     (e.album && e.album.toLowerCase().includes(q))
   ).slice(0, 5);
 
-  // Search currently-cached chart songs (instant local match)
-  const discoverMatches = (_topSongsCache || []).filter(s =>
-    s.title.toLowerCase().includes(q) ||
-    s.artist.toLowerCase().includes(q) ||
-    (s.album && s.album.toLowerCase().includes(q))
-  ).filter(dm => !journalMatches.some(jm => jm.title === dm.title && jm.artist === dm.artist))
-    .slice(0, 5);
-
   let html = '';
 
-  if (journalMatches.length > 0) {
-    html += '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Your Journal</div>';
-    journalMatches.forEach(e => {
-      const hue = getCoverHue(e.title, e.artist);
-      const cover = e.coverUrl
-        ? `<img class="search-result-cover-img" src="${escapeHtml(e.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
-        : '';
-      html += `
-        <div class="search-result-item" data-action="detail" data-id="${e.id}">
-          <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
-            ${cover}
-          </div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escapeHtml(e.title)}</div>
-            <div class="search-result-meta">${escapeHtml(e.artist)} · ★ ${e.rating || '—'}</div>
-          </div>
-          <div class="search-result-action">View</div>
-        </div>
-      `;
-    });
+  // Show journal matches immediately
+  if (journalMatches.length) {
+    html += searchSectionHeader('From Your Journal');
+    html += journalMatches.map(e => {
+      const type = e.artist.toLowerCase().includes(q) && !e.title.toLowerCase().includes(q) ? 'Artist' : 'Song';
+      return searchResultCard({
+        action: 'detail', id: e.id, title: e.title, artist: e.artist,
+        album: e.album, cover: e.coverUrl, type, rating: e.rating,
+      });
+    }).join('');
   }
 
-  if (discoverMatches.length > 0) {
-    html += '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Trending Now</div>';
-    discoverMatches.forEach(s => {
-      const hue = getCoverHue(s.title, s.artist);
-      const cover = s.coverUrl
-        ? `<img class="search-result-cover-img" src="${escapeHtml(s.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
-        : '';
-      html += `
-        <div class="search-result-item" data-action="log"
-          data-title="${escapeHtml(s.title)}"
-          data-artist="${escapeHtml(s.artist)}"
-          data-album="${escapeHtml(s.album || '')}"
-          data-genre="${escapeHtml((s.genres && s.genres[0]) || '')}"
-          data-cover="${escapeHtml(s.coverUrl || '')}">
-          <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
-            ${cover}
-          </div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escapeHtml(s.title)}</div>
-            <div class="search-result-meta">${escapeHtml(s.artist)}</div>
-          </div>
-          <div class="search-result-action">+ Log</div>
-        </div>
-      `;
-    });
-  }
-
-  // Placeholder for live MusicBrainz results — filled async below.
-  html += '<div id="mbResultsSection"><div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Music Database</div><div class="mb-loading">Searching MusicBrainz…</div></div>';
-
+  // Show skeleton for external results
+  html += `<div id="searchExternalSection">${searchSectionHeader('Results')}${renderSearchSkeleton()}</div>`;
   searchResults.innerHTML = html;
+  _searchSelectedIdx = -1;
 
-  // Kick off the MusicBrainz search. Token-guard against stale responses.
-  const myToken = ++mbSearchToken;
-  searchMusicBrainz(query).then(results => {
-    if (myToken !== mbSearchToken) return;
-    const section = document.getElementById('mbResultsSection');
-    if (!section) return;
-    if (!results.length) {
-      section.querySelector('.mb-loading').textContent = 'No matches in MusicBrainz.';
-      return;
-    }
-    section.innerHTML = '<div style="padding: 8px 20px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);">Music Database</div>' +
-      results.map(r => {
-        const hue = getCoverHue(r.title, r.artist);
-        const cover = r.coverUrl
-          ? `<img class="search-result-cover-img" src="${escapeHtml(r.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
-          : '';
-        return `
-          <div class="search-result-item" data-action="log"
-            data-title="${escapeHtml(r.title)}"
-            data-artist="${escapeHtml(r.artist)}"
-            data-album="${escapeHtml(r.album || '')}"
-            data-genre=""
-            data-cover="${escapeHtml(r.coverUrl || '')}"
-            data-mbid="${escapeHtml(r.mbId)}"
-            data-rid="${escapeHtml(r.releaseId || '')}"
-            data-rgid="${escapeHtml(r.releaseGroupId || '')}">
-            <div class="search-result-cover" style="background: linear-gradient(135deg, hsl(${hue},40%,25%), hsl(${hue+40},35%,18%));">
-              ${cover}
-            </div>
-            <div class="search-result-info">
-              <div class="search-result-title">${escapeHtml(r.title)}</div>
-              <div class="search-result-meta">${escapeHtml(r.artist)}${r.album ? ' · ' + escapeHtml(r.album) : ''}</div>
-            </div>
-            <div class="search-result-action">+ Log</div>
-          </div>
-        `;
-      }).join('');
+  // ── Fetch Last.fm + iTunes in parallel ──
+  const [lastFmResults, itunesResults] = await Promise.all([
+    searchLastFmTracks(query),
+    searchITunesSongs(query),
+  ]);
+
+  if (token !== _searchToken) return; // stale
+
+  // Build a merged & deduplicated result set.
+  // Use iTunes for cover art + album, Last.fm for listener counts.
+  const merged = [];
+  const seen = new Set();
+
+  // Map Last.fm results by normalized key for listener lookup
+  const lfmMap = {};
+  lastFmResults.forEach(t => {
+    lfmMap[`${t.artist.toLowerCase()}::${t.title.toLowerCase()}`] = t.listeners;
   });
+
+  // Start with iTunes results (they have cover art + album)
+  itunesResults.forEach(r => {
+    const key = `${r.artist.toLowerCase()}::${r.title.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push({
+      title: r.title,
+      artist: r.artist,
+      album: r.album,
+      cover: r.coverUrl,
+      genre: r.genre,
+      listeners: lfmMap[key] || 0,
+      type: 'Song',
+    });
+  });
+
+  // Add Last.fm results not in iTunes
+  lastFmResults.forEach(t => {
+    const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push({
+      title: t.title,
+      artist: t.artist,
+      album: '',
+      cover: null,
+      genre: '',
+      listeners: t.listeners,
+      type: 'Song',
+    });
+  });
+
+  // Sort by listeners descending
+  merged.sort((a, b) => (b.listeners || 0) - (a.listeners || 0));
+
+  // If query looks like an artist, inject an artist card at the top
+  if (queryType === 'artist' || merged.length > 0) {
+    const artistName = queryType === 'artist'
+      ? (journal.find(e => e.artist.toLowerCase() === q) || { artist: query }).artist
+      : null;
+    // Check if multiple results share the same artist — suggests artist query
+    if (!artistName && merged.length >= 2) {
+      const topArtist = merged[0].artist.toLowerCase();
+      const matchCount = merged.filter(m => m.artist.toLowerCase() === topArtist).length;
+      if (matchCount >= 3 && topArtist.includes(q)) {
+        // Promote an artist card
+        const sample = merged.find(m => m.artist.toLowerCase() === topArtist);
+        merged.unshift({
+          title: sample.artist,
+          artist: sample.artist,
+          album: '',
+          cover: sample.cover,
+          genre: '',
+          listeners: merged.filter(m => m.artist.toLowerCase() === topArtist).reduce((s, m) => s + (m.listeners || 0), 0),
+          type: 'Artist',
+          isArtistCard: true,
+        });
+      }
+    } else if (artistName) {
+      const sample = merged.find(m => m.artist.toLowerCase() === artistName.toLowerCase());
+      const jSample = journal.find(e => e.artist.toLowerCase() === artistName.toLowerCase());
+      merged.unshift({
+        title: artistName,
+        artist: artistName,
+        album: '',
+        cover: (sample && sample.cover) || (jSample && jSample.coverUrl) || null,
+        genre: '',
+        listeners: merged.filter(m => m.artist.toLowerCase() === artistName.toLowerCase()).reduce((s, m) => s + (m.listeners || 0), 0),
+        type: 'Artist',
+        isArtistCard: true,
+      });
+    }
+  }
+
+  // Limit to top 10
+  const finalResults = merged.slice(0, 10);
+
+  const section = document.getElementById('searchExternalSection');
+  if (!section) return;
+
+  if (!finalResults.length) {
+    section.innerHTML = '<div class="search-empty">No results found. Try a different search.</div>';
+    return;
+  }
+
+  section.innerHTML = searchSectionHeader('Results') + finalResults.map(r => {
+    if (r.isArtistCard) {
+      return searchResultCard({
+        action: 'log', title: r.title, artist: r.artist,
+        cover: r.cover, type: 'Artist', listeners: r.listeners,
+      });
+    }
+    return searchResultCard({
+      action: 'log', title: r.title, artist: r.artist,
+      album: r.album, cover: r.cover, genre: r.genre,
+      type: r.type || 'Song', listeners: r.listeners,
+    });
+  }).join('');
+
+  _searchSelectedIdx = -1;
+
+  // Lazy-enrich cover art for results that are missing it
+  finalResults.forEach(async (r, i) => {
+    if (r.cover) return;
+    const cover = await enrichArt(r, 'track');
+    if (token !== _searchToken) return;
+    if (!cover) return;
+    const items = section.querySelectorAll('.search-result-item');
+    const el = items[i];
+    if (!el) return;
+    el.dataset.cover = cover;
+    const wrap = el.querySelector('.search-result-cover');
+    if (wrap && !wrap.querySelector('img')) {
+      wrap.insertAdjacentHTML('beforeend',
+        `<img class="search-result-cover-img" src="${escapeHtml(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`);
+    }
+  });
+}
+
+// ── Keyboard navigation ──
+function updateSearchSelection(idx) {
+  const items = searchResults.querySelectorAll('.search-result-item:not(.search-skeleton)');
+  items.forEach((el, i) => el.classList.toggle('search-selected', i === idx));
+  if (items[idx]) items[idx].scrollIntoView({ block: 'nearest' });
+}
+
+function handleSearchKeydown(e) {
+  if (!searchOverlay.classList.contains('active')) return;
+  const items = searchResults.querySelectorAll('.search-result-item:not(.search-skeleton)');
+  const count = items.length;
+  if (!count && e.key !== 'Escape') return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _searchSelectedIdx = (_searchSelectedIdx + 1) % count;
+    updateSearchSelection(_searchSelectedIdx);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _searchSelectedIdx = (_searchSelectedIdx - 1 + count) % count;
+    updateSearchSelection(_searchSelectedIdx);
+  } else if (e.key === 'Enter' && _searchSelectedIdx >= 0 && items[_searchSelectedIdx]) {
+    e.preventDefault();
+    items[_searchSelectedIdx].click();
+  }
 }
 
 // ── Auth Modal ──────────────────────────
@@ -1886,18 +2116,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === searchOverlay) closeSearch();
   });
 
-  // Search input (debounced so we don't hammer MusicBrainz on every keystroke)
+  // Search input (debounced 300ms)
   let searchDebounce;
   searchInput.addEventListener('input', (e) => {
     const v = e.target.value;
     clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => performSearch(v), 250);
+    _searchSelectedIdx = -1;
+    searchDebounce = setTimeout(() => performSearch(v), 300);
   });
+
+  // Keyboard navigation in search
+  searchInput.addEventListener('keydown', handleSearchKeydown);
 
   // Search result clicks
   searchResults.addEventListener('click', (e) => {
     const item = e.target.closest('.search-result-item');
-    if (!item) return;
+    if (!item || item.classList.contains('search-skeleton')) return;
 
     if (item.dataset.action === 'detail') {
       closeSearch();
